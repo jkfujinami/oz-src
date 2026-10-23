@@ -1,0 +1,34 @@
+{
+  "name": "oz-protocol-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*",
+    "web",
+    "server"
+  ],
+  "scripts": {
+    "dev": "npm --workspace=web run dev",
+    "dev:desktop": "npm --workspace=@oz/desktop run dev",
+    "build:core": "npm --workspace=@oz/core run build",
+    "build:pow-wasm": "npm --workspace=@oz/core run build:pow-wasm",
+    "build:desktop": "npm --workspace=@oz/desktop run build",
+    "build:web": "npm --workspace=web run build",
+    "typecheck": "npm --workspace=@oz/core run typecheck && npm --workspace=@oz/ui run typecheck && npm --workspace=@oz/tracker run typecheck && npm --workspace=@oz/guard run typecheck && npm --workspace=@oz/desktop run typecheck && npm --workspace=web run typecheck",
+    "test": "npm run test:core && npm run test:ui && npm run test:tracker && npm run test:guard && npm run test:desktop && npm run test:web",
+    "test:core": "npm --workspace=@oz/core test",
+    "test:ui": "npm --workspace=@oz/ui test",
+    "test:desktop": "npm --workspace=@oz/desktop test",
+    "test:web": "npm --workspace=web test",
+    "check": "npm run build:core && npm run typecheck && npm test",
+    "test:tracker": "npm --workspace=@oz/tracker test",
+    "test:guard": "npm --workspace=@oz/guard test",
+    "tracker": "npm --workspace=@oz/tracker start",
+    "guard": "npm --workspace=@oz/guard start --",
+    "release": "bash scripts/release.sh"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1"
+  }
+}

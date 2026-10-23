@@ -1,0 +1,29 @@
+{
+  "name": "@oz/tracker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/main.mjs --log-level=warning --external:ws --external:libsodium-wrappers-sumo --external:idb --external:@msgpack/msgpack",
+    "start": "npm run build --silent && node dist/main.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@oz/core": "*",
+    "ws": "^8.20.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.21.0",
+    "typescript": "^5",
+    "vitest": "^3.2.7"
+  }
+}

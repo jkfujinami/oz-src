@@ -1,0 +1,55 @@
+# デスクトップ版の配布パッケージ (npm run dist:mac / dist:win / dist:linux)
+#
+# ★ コード署名はしない (Apple / Microsoft の開発者アカウントに身元が結び付くため)。
+#   macOS は初回に「開発元を確認できません」と出るので、右クリック →「開く」で起動してもらう。
+# ★ 描画側も main も Vite でまとめてあるので、node_modules は入れない (files に dist だけを並べる)。
+appId: org.ozprotocol.oz
+productName: OZ
+copyright: ""
+directories:
+  output: release
+  buildResources: build
+files:
+  - dist/**
+  - dist-electron/**
+  - package.json
+extraResources:
+  - from: build/tray.png
+    to: tray.png
+  - from: build/tray@2x.png
+    to: tray@2x.png
+asar: true
+publish: null
+# Electron はワークスペースの最上位の node_modules にある (ここからは版を読めない)。入れた版と合わせること
+electronVersion: 34.5.8
+# ネイティブの依存は無い (すべて Vite でまとめてある)
+npmRebuild: false
+
+mac:
+  category: public.app-category.social-networking
+  identity: null
+  hardenedRuntime: false
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+
+nsis:
+  # 空白の無いファイル名にする (リリースに載せると空白が . に変わり、SHA256SUMS.txt と名前がずれるため)
+  artifactName: ${productName}-${version}-setup.${ext}
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  # 作業後にインストール先などの痕跡を残しにくくするため、スタートメニュー以外のショートカットは作らない
+  createDesktopShortcut: false
+
+linux:
+  category: Network
+  target:
+    - target: AppImage
+      arch: [x64]

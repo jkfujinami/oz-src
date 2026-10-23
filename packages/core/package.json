@@ -1,0 +1,41 @@
+{
+  "name": "@oz/core",
+  "version": "1.0.0",
+  "description": "OZ P2P Anonymity Hardened Core Protocol Library",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "test:sim": "RUN_SIM=1 vitest run tests/simulation",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
+    "build:cli": "esbuild src/cli/guardMaintainerMain.ts --bundle --platform=node --target=node20 --format=cjs --outfile=dist-cli/guard-maintainer.cjs",
+    "guard-maintainer": "npm run build:cli --silent && node dist-cli/guard-maintainer.cjs",
+    "build:pow-wasm": "cargo build --release --target wasm32-unknown-unknown --manifest-path ../pow-wasm/Cargo.toml && node scripts/embed-pow-wasm.mjs"
+  },
+  "dependencies": {
+    "@msgpack/msgpack": "^3.1.3",
+    "idb": "^8.0.3",
+    "libsodium-wrappers-sumo": "^0.8.4"
+  },
+  "devDependencies": {
+    "@types/libsodium-wrappers-sumo": "^0.7.8",
+    "@types/node": "^20",
+    "esbuild": "^0.28.2",
+    "fake-indexeddb": "^6.2.5",
+    "typescript": "^5",
+    "vitest": "^3.2.7"
+  },
+  "bin": {
+    "oz-guard-maintainer": "dist-cli/guard-maintainer.cjs"
+  }
+}
