@@ -4,6 +4,9 @@ const PASS = 'e2e-passphrase-long';
 
 async function unlock(page: Page) {
   await page.goto('/');
+  // 初回は利用規約への同意を求められる
+  await page.getByLabel('利用規約を読み、内容に同意します').check();
+  await page.getByRole('button', { name: '同意して始める' }).click();
   await page.getByLabel('パスワード', { exact: true }).fill(PASS);
   await page.getByLabel('パスワード (確認)').fill(PASS);
   await page.locator('button[type=submit]').click();

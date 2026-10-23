@@ -8,6 +8,7 @@ import ThreadView from './components/ThreadView';
 import { OzzyVaultView } from './components/OzzyVaultView';
 import { SettingsView, type SettingsSection } from './components/SettingsView';
 import { AboutView } from './components/AboutView';
+import { TermsGate } from './components/TermsGate';
 import { useRoute, absorbLocationHash, dismissKeyLinkNotice } from './lib/route';
 import { resetOzzyPrefs } from './lib/ozzyPrefs';
 import type { GuardTrustConfig } from './lib/guardSetting';
@@ -112,9 +113,12 @@ export default function App({ badge = 'Desktop Full Node', defaultTrackerUrl = n
   }, []);
   return (
     <AppConfigContext.Provider value={{ badge }}>
-      <P2PProvider defaultTrackerUrl={defaultTrackerUrl} trust={trust} iceServers={iceServers}>
-        <LockGate />
-      </P2PProvider>
+      {/* 利用規約に同意するまでは、データベースもネットワークも始めない */}
+      <TermsGate>
+        <P2PProvider defaultTrackerUrl={defaultTrackerUrl} trust={trust} iceServers={iceServers}>
+          <LockGate />
+        </P2PProvider>
+      </TermsGate>
     </AppConfigContext.Provider>
   );
 }

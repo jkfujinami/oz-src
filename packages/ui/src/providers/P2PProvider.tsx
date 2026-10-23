@@ -17,6 +17,7 @@ import {
 import { loadTrackerUrl, saveTrackerUrl, loadIceServers, saveIceServers } from '../lib/trackerSetting';
 import type { GuardTrustConfig } from '../lib/guardSetting';
 import { resetRoute } from '../lib/route';
+import { clearTermsAccepted } from '../lib/terms';
 import { useAutoLock } from '../hooks/useAutoLock';
 
 const log = createLogger('ui.p2p');
@@ -242,6 +243,7 @@ export function P2PProvider({
     setNode(null);
     await store().wipeAll();
     storeRef.current = null;
+    clearTermsAccepted();
     resetRoute();
     setUnlockError(null);
     setLockState('setup');
@@ -257,6 +259,7 @@ export function P2PProvider({
       await store().wipeAll();
     }
     storeRef.current = null;
+    clearTermsAccepted();
     resetRoute();
     setLockState('setup');
     // ★ デスクトップ版は、ブラウザ側の保存領域・キャッシュ・userData も消して終了する

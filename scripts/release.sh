@@ -62,8 +62,18 @@ The builds are not code-signed.
 - **Windows:** when SmartScreen warns about an unknown publisher, choose **More info → Run anyway**.
 - **Linux:** `chmod +x OZ-*.AppImage` and run it.
 
-macOS・Windows・Linux 用のインストーラです。`SHA256SUMS.txt` で照合してください。コード署名はしていません。
-macOS は初回に右クリック →「開く」、Windows は「詳細情報 → 実行」で起動してください。
+By using OZ you agree to the [Terms of Use](https://github.com/jkfujinami/Oz/blob/main/TERMS.md).
+
+---
+
+macOS・Windows・Linux 向けのインストーラーです。ダウンロードしたファイルは `SHA256SUMS.txt` と照合して、改ざんされていないことを確認できます。
+
+コード署名は行っていないため、初回は次の方法で起動してください。
+- **macOS：** 「アプリケーション」フォルダの OZ を右クリックし、「開く」を選択してください。
+- **Windows：** SmartScreen の警告が表示されたら、「詳細情報」→「実行」を選択してください。
+- **Linux：** `chmod +x OZ-*.AppImage` を実行してから起動してください。
+
+ご利用の前に、必ず[利用規約](https://github.com/jkfujinami/Oz/blob/main/TERMS.md)をお読みください。
 EOF
 
 gh release create "$VERSION" --repo "$RELEASE_REPO" --title "OZ $VERSION" --notes-file "$NOTES" \

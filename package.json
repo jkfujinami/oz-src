@@ -26,7 +26,8 @@
     "test:guard": "npm --workspace=@oz/guard test",
     "tracker": "npm --workspace=@oz/tracker start",
     "guard": "npm --workspace=@oz/guard start --",
-    "release": "bash scripts/release.sh"
+    "release": "bash scripts/release.sh",
+    "terms": "tsx scripts/render-terms.ts"
   },
   "devDependencies": {
     "jsdom": "^29.1.1"

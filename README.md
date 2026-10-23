@@ -10,11 +10,14 @@
 <p align="center">
   <a href="https://github.com/jkfujinami/Oz/releases/latest">Download</a> ·
   <a href="https://ozzy-web.pages.dev/">Web version</a> ·
+  <a href="TERMS.md">Terms of use</a> ·
   <a href="README.ja.md">日本語</a>
 </p>
 
 > [!WARNING]
 > OZ is experimental and has not been audited. Do not rely on it where your safety is at stake.
+
+By using OZ you agree to the [Terms of Use](TERMS.md) (in Japanese). In short: follow the laws of the country where you use it, do not share anything that infringes copyright or is otherwise illegal, and use it at your own risk. The app asks for your agreement the first time it starts.
 
 ## What it does
 
@@ -88,6 +91,6 @@ Releases are built on the maintainer's machine with [`scripts/release.sh`](scrip
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md), not in public issues.
 
-## License
+## License and terms of use
 
-[MIT](LICENSE). OZ is provided as is, without warranty. You are responsible for how you use it and for complying with the laws that apply to you.
+The software is licensed under the [MIT License](LICENSE), and its use is governed by the [Terms of Use](TERMS.md). OZ is provided as is, without warranty. You are responsible for how you use it and for complying with the laws that apply to you.

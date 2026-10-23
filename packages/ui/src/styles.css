@@ -1633,3 +1633,50 @@ main {
     transition-duration: 0.01ms !important;
   }
 }
+/* ───────────────────────── terms ───────────────────────── */
+
+@counter-style oz-paren {
+  system: extends decimal;
+  prefix: "(";
+  suffix: ") ";
+}
+
+.terms-card {
+  width: min(720px, 100%);
+}
+
+.terms-box {
+  max-height: min(52vh, 520px);
+  overflow-y: auto;
+  padding: 14px 18px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+}
+
+.terms-box:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+.terms ol {
+  padding-left: 1.6em;
+}
+
+.terms ol.terms-items {
+  list-style: oz-paren;
+  padding-left: 2.4em;
+  margin-top: 8px;
+}
+
+.terms-heading {
+  margin: 18px 0 6px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.terms-date {
+  margin-top: 18px;
+  text-align: right;
+  color: var(--text-3);
+}

@@ -1,4 +1,6 @@
 import { SecurityInfo } from './SecurityInfo';
+import { TermsText } from './TermsText';
+import { TERMS_TITLE } from '../lib/terms';
 
 /**
  * 仕組みと安全性の説明をまとめた画面。各画面には短い案内だけを置き、詳しい説明はここに集める。
@@ -69,6 +71,11 @@ export function AboutView() {
               <li>表示された <code>https://….workers.dev</code> を、設定の「ファイル共有」に貼る。</li>
             </ol>
           </div>
+        </section>
+
+        <section className="panel" aria-labelledby="a-terms">
+          <h2 id="a-terms" className="panel-title">{TERMS_TITLE}</h2>
+          <TermsText />
         </section>
       </div>
     </div>

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import React from 'react';
-import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor, act } from '@testing-library/react';
 import sodium from 'libsodium-wrappers-sumo';
 
@@ -11,6 +11,7 @@ import ThreadView from '../src/components/ThreadView';
 import App, { RouterView } from '../src/App';
 import { P2PProvider, P2PContextForTest, NO_GUARD_STATUS } from '../src/providers/P2PProvider';
 import { getRoute, navigate, resetRoute } from '../src/lib/route';
+import { saveTermsAccepted } from '../src/lib/terms';
 
 /** ロック解除済みの最小のコンテキスト (ノード無し) */
 function readyContext(): any {
@@ -250,6 +251,9 @@ describe('Desktop UI Rendering & Workflows (OZ Specification)', () => {
   });
 
   describe('Desktop App Whole Integration', () => {
+    // 利用規約の同意画面は Terms.test.tsx で確かめる。ここでは同意済みから始める
+    beforeEach(() => saveTermsAccepted());
+
     it('起動するとまずパスワード画面が出て、ロック解除まで板は表示されない', async () => {
       render(<App />);
 
