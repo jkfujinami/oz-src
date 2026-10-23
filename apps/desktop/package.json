@@ -1,7 +1,7 @@
 {
   "name": "@oz/desktop",
   "productName": "OZ",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
   "description": "Oz Protocol desktop node",
   "author": "Oz Protocol",

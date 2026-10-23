@@ -17,7 +17,8 @@ cd "$ROOT"
 command -v gh >/dev/null || { echo "gh が見つかりません (brew install gh)"; exit 1; }
 gh auth status >/dev/null 2>&1 || { echo "gh にログインしていません (gh auth login)"; exit 1; }
 
-if [ -n "$(git status --porcelain)" ]; then
+# ドキュメント (*.md) の書きかけはビルドに入らないので見ない
+if [ -n "$(git status --porcelain -- . ':(exclude)*.md')" ]; then
   echo "コミットしていない変更があります。コミットしてから実行してください。"
   exit 1
 fi
@@ -42,6 +43,18 @@ cd apps/desktop
 rm -rf release
 CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac --win --linux --publish never
 
+# 中継 Worker の設置キット (worker.js・設置用スクリプト・説明書)。コードを公開していないので、ここで配る。
+# Windows で開くファイルは改行を CRLF にする (LF のままだと bat の goto が誤動作することがある)
+KIT_TMP="$(mktemp -d)"
+mkdir "$KIT_TMP/OZ-worker"
+cp "$ROOT/packages/r2-worker/worker.js" "$ROOT/packages/r2-worker/deploy-worker.sh" "$KIT_TMP/OZ-worker/"
+chmod 755 "$KIT_TMP/OZ-worker/deploy-worker.sh"
+for f in deploy-worker.bat README.txt; do
+  perl -pe 's/\r?\n/\r\n/' "$ROOT/packages/r2-worker/$f" > "$KIT_TMP/OZ-worker/$f"
+done
+(cd "$KIT_TMP" && zip -qrX "$ROOT/apps/desktop/release/OZ-worker-${VERSION#v}.zip" OZ-worker)
+rm -rf "$KIT_TMP"
+
 cd release
 shopt -s nullglob
 FILES=(*.dmg *.zip *.exe *.AppImage)
@@ -62,6 +75,8 @@ The builds are not code-signed.
 - **Windows:** when SmartScreen warns about an unknown publisher, choose **More info → Run anyway**.
 - **Linux:** `chmod +x OZ-*.AppImage` and run it.
 
+`OZ-worker-<version>.zip` is the kit for setting up your own relay Worker, which file sharing needs. Follow `README.txt` inside (Japanese).
+
 By using OZ you agree to the [Terms of Use](https://github.com/jkfujinami/Oz/blob/main/TERMS.md).
 
 ---
@@ -72,6 +87,8 @@ macOS・Windows・Linux 向けのインストーラーです。ダウンロー�
 - **macOS：** 「アプリケーション」フォルダの OZ を右クリックし、「開く」を選択してください。
 - **Windows：** SmartScreen の警告が表示されたら、「詳細情報」→「実行」を選択してください。
 - **Linux：** `chmod +x OZ-*.AppImage` を実行してから起動してください。
+
+`OZ-worker-<版>.zip` は、ファイル共有に必要な中継 Worker の設置キットです。手順は同梱の `README.txt` をご覧ください。
 
 ご利用の前に、必ず[利用規約](https://github.com/jkfujinami/Oz/blob/main/TERMS.md)をお読みください。
 EOF

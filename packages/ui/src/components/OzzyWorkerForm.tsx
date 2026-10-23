@@ -4,8 +4,8 @@ import { useP2P } from '../providers/P2PProvider';
 const REASON_TEXT = {
   'bad-url': 'https://<名前>.<サブドメイン>.workers.dev の形で入れてください (独自ドメインは使えません)',
   unreachable: 'Worker に届きません。デプロイが終わっているか、URL が合っているか確かめてください',
-  'not-ozzy': 'Ozzy の Worker ではありません (packages/r2-worker をデプロイしてください)',
-  outdated: 'Worker の版が古いです。最新の packages/r2-worker をデプロイし直してください',
+  'not-ozzy': 'OZ の中継 Worker ではありません。配布ページの OZ-worker を設置してください',
+  outdated: 'Worker の版が古いです。最新の OZ-worker で設置し直してください',
 } as const;
 
 /** 自分の中継 Worker の URL を確かめて設定する欄 (ファイル共有の最初の画面と、設定画面で使う) */

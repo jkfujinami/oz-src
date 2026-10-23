@@ -62,13 +62,16 @@ export function AboutView() {
           <h2 id="a-worker" className="panel-title">中継 Worker</h2>
           <div className="prose">
             <p>
-              ファイル共有を使う人は全員、Cloudflare Workers に中継用の Worker を 1 つずつデプロイして出し合います。
-              あなたの Worker は他の人の M1 がロッカーへ行くときの中継に使われます。Worker の URL は他の参加者に配られます。
+              ファイル共有を利用する方には、Cloudflare Workers に中継用の Worker を 1 つずつ設置していただきます。
+              設置した Worker は、他の参加者の中継ノード (M1) がファイル置き場にアクセスする際の中継に使われます。Worker の URL は他の参加者に共有されます。
             </p>
             <ol>
-              <li>Cloudflare のアカウントを作る。本名や普段のメールに結び付かないものにし、workers.dev のサブドメインも身元が分からない名前にする。</li>
-              <li><code>packages/r2-worker</code> で <code>./deploy-worker.sh</code> (Windows は <code>deploy-worker.bat</code>) を実行する。カード登録は要りません。</li>
-              <li>表示された <code>https://….workers.dev</code> を、設定の「ファイル共有」に貼る。</li>
+              <li>Cloudflare のアカウントを作成します。本名や普段お使いのメールアドレスと結び付かないアカウントにし、workers.dev のサブドメインにも身元が推測できない名前を付けてください。</li>
+              <li>
+                配布ページ (<code>https://github.com/jkfujinami/Oz/releases/latest</code>) から <code>OZ-worker-&lt;版&gt;.zip</code> をダウンロードし、同梱の README.txt の手順で Worker を設置します。
+                Cloudflare の管理画面にコードを貼り付ける方法なら、ソフトウェアのインストールは不要です。クレジットカードの登録も必要ありません。
+              </li>
+              <li>表示された <code>https://….workers.dev</code> の URL を、「設定」→「ファイル共有」に貼り付けます。</li>
             </ol>
           </div>
         </section>
