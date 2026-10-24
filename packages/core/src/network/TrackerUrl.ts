@@ -33,6 +33,19 @@ function isLoopbackHost(hostname: string): boolean {
   return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
 }
 
+/**
+ * トラッカーが自分の端末か (開発用の網)。この網に限り、経路の各段が同じ端末でもよいことにする
+ * (1 台で複数のノードを立てて試すため。PeerManager の allowSameOriginHops)。
+ */
+export function isLoopbackTrackerUrl(url: string | null | undefined): boolean {
+  if (!url) return false;
+  try {
+    return isLoopbackHost(new URL(url).hostname);
+  } catch {
+    return false;
+  }
+}
+
 export function parseTrackerUrl(input: string): TrackerUrlResult {
   const raw = typeof input === 'string' ? input.trim() : '';
   if (raw.length === 0) return { ok: false, reason: 'empty' };

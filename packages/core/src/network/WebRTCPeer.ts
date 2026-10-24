@@ -3,7 +3,7 @@ import { RingPosition } from './RingPosition';
 import { ChunkedSender } from './stream/ChunkedSender';
 import { ChunkedReceiver } from './stream/ChunkedReceiver';
 import { createLogger } from '../common/Logger';
-import { netGroupOf } from './NetGroup';
+import { netGroupOf, originKeyOf, ORIGIN_LAN, ORIGIN_UNKNOWN } from './NetGroup';
 
 const log = createLogger('net.webrtc');
 
@@ -43,6 +43,8 @@ export class WebRTCPeer implements IPeerConnection {
   private _powCounter: number | null = null;
   private _verifiedAt: number | null = null;
   private _netGroup: string | null = null;
+  private _origin: string | null = null;
+  private _localOrigins: string[] = [];
 
   /**
    * 接続の向き。outbound = 自分で選んで張りに行った接続、inbound = 相手から来た接続。
@@ -83,6 +85,19 @@ export class WebRTCPeer implements IPeerConnection {
     return this._netGroup;
   }
 
+  /** 相手の出所の鍵 ({@link originKeyOf})。経路の各段が同じ家にならないように比べる。未取得なら null */
+  public get origin(): string | null {
+    return this._origin;
+  }
+
+  /**
+   * この接続で分かった自分の公開側の出所 (STUN などで分かった、外から見えている自分の鍵)。
+   * 私設アドレスしか分からなければ空。
+   */
+  public get localOrigins(): readonly string[] {
+    return this._localOrigins;
+  }
+
   /**
    * 確定した経路 (selected candidate pair) から相手の出所の区分を求める。
    * IP そのものは保持しない。取れなければ 'unknown'。
@@ -105,11 +120,27 @@ export class WebRTCPeer implements IPeerConnection {
         }
       }
       const remote = pair ? all.get(pair.remoteCandidateId) : null;
-      if (remote) group = netGroupOf(remote.address ?? remote.ip, remote.candidateType);
+      if (remote) {
+        group = netGroupOf(remote.address ?? remote.ip, remote.candidateType);
+        this._origin = originKeyOf(remote.address ?? remote.ip, remote.candidateType);
+      }
+      // 自分の公開側: 使っている経路の自分側と、STUN で分かった自分の候補 (srflx / prflx)
+      const mine = new Set<string>();
+      const local = pair ? all.get(pair.localCandidateId) : null;
+      if (local) mine.add(originKeyOf(local.address ?? local.ip, local.candidateType));
+      for (const c of all.values()) {
+        if (c.type === 'local-candidate' && (c.candidateType === 'srflx' || c.candidateType === 'prflx')) {
+          mine.add(originKeyOf(c.address ?? c.ip, c.candidateType));
+        }
+      }
+      mine.delete(ORIGIN_LAN);
+      mine.delete(ORIGIN_UNKNOWN);
+      this._localOrigins = [...mine];
     } catch {
       // getStats が使えない環境では 'unknown' のまま
     }
     this._netGroup = group;
+    if (this._origin === null) this._origin = ORIGIN_UNKNOWN;
     return group;
   }
 

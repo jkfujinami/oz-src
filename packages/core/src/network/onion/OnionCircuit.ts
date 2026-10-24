@@ -10,6 +10,7 @@ import { createLogger } from '../../common/Logger';
 import { WireType } from '../wire/WireTypes';
 import { SeenCache } from '../gossip/SeenCache';
 import { secureWeightedIndex, OBSERVATION_SATURATION_MS, type DandelionRouter } from '../gossip/DandelionRouter';
+import { ORIGIN_PENDING, sameOrigin } from '../NetGroup';
 
 const log = createLogger('net.onion');
 
@@ -711,8 +712,39 @@ export class OnionCircuit {
   }
 
   private currentGuard(): OnionHop | null {
-    const candidates = this.verifiedNeighbors();
-    return this.dandelion.getPinnedGuard(candidates);
+    return this.dandelion.getPinnedGuard(this.guardCandidates());
+  }
+
+  /**
+   * Guard の候補。自分と同じ出所 (同じ LAN・同じ公開 IP。同じ端末の別のノードを含む) の隣人は除く。
+   *
+   * ★ Guard が自分と同じ家にいると、M1 から見た「前の段」の IP が自分の IP になる。M1 は投稿や
+   *   要求の中身を見る出口なので、M1 だけで作者が分かってしまう。
+   * ★ 出所をまだ求めていない隣人も使わない (分かってから選ぶ)。
+   */
+  private guardCandidates(): OnionHop[] {
+    const all = this.verifiedNeighbors();
+    const pm = this.peerManager;
+    if (!pm.originOf || !pm.isOwnOrigin || pm.sameOriginHopsAllowed) return all;
+    return all.filter((h) => {
+      const origin = pm.originOf!(h.peerId);
+      return origin !== ORIGIN_PENDING && !pm.isOwnOrigin!(origin);
+    });
+  }
+
+  /**
+   * Guard として、この送り主のセルを M1 へ渡してよいか。
+   *
+   * - 送り主と M1 が同じ出所なら渡さない。M1 が出す要求や投稿が、送り主の IP から出ることになる。
+   * - 送り主が自分 (Guard) と同じ出所なら渡さない。M1 から見た前の段の IP が送り主の IP になる。
+   * 出所をまだ求めていない相手も、分かるまでは渡さない。
+   */
+  private relayAllowed(senderId: PeerId, nextHop: PeerId): boolean {
+    const pm = this.peerManager;
+    if (!pm.originOf || !pm.isOwnOrigin || pm.sameOriginHopsAllowed) return true;
+    const from = pm.originOf(senderId);
+    if (from === ORIGIN_PENDING || pm.isOwnOrigin(from)) return false;
+    return !sameOrigin(from, pm.originOf(nextHop));
   }
 
   private verifiedNeighbors(): OnionHop[] {
@@ -858,6 +890,8 @@ export class OnionCircuit {
     if (nextHop === senderId || nextHop === this.peerManager.myPeerId) return;
     // 正規の回路 (Guard → M1) の内側は常に固定長の M1 層。それ以外は作られたセル
     if (innerOnion.byteLength !== SEALED_EXIT_LAYER_SIZE) return;
+    // 送り主・M1・自分が同じ家にならないこと (relayAllowed)
+    if (!this.relayAllowed(senderId, nextHop)) return;
 
     let padded: Uint8Array;
     try {

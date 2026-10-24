@@ -4,6 +4,7 @@ import { WireType } from './wire/WireTypes';
 import { MAX_PEX_ENTRIES } from './wire/WireCodec';
 import { createLogger } from '../common/Logger';
 import { secureRandomIndex } from './gossip/DandelionRouter';
+import { sameOrigin } from './NetGroup';
 
 const log = createLogger('net.pex');
 
@@ -48,8 +49,14 @@ export class PEXHandler {
     // pubkey と powCounter はどちらも JOIN で誰にでも開示している公開情報。
     // ★ ワイヤの項目は pubkey + powCounter だけ (peerId は pubkey から導出される)。claim を持たない
     //   相手は WireCodec が運ばない (受け手が検証できないものは紹介しない)。検証済みの隣人は必ず持っている。
+    // ★ 相手と同じ出所 (同じ LAN・同じ公開 IP) の隣人は紹介しない。紹介した隣人は相手の回路の
+    //   M1 の候補になり、M1 が出す要求や投稿が相手と同じ IP から出てしまう (OnionCircuit の relayAllowed)。
+    const pm = this.peerManager;
+    const filterOrigin = !!pm.originOf && !pm.sameOriginHopsAllowed;
+    const requesterOrigin = filterOrigin ? pm.originOf!(senderPeerId) : '';
     const candidates = Array.from(this.peerManager.peers.values())
       .filter(p => p.peerId !== senderPeerId && p.isConnected && p.isVerified)
+      .filter(p => !filterOrigin || !sameOrigin(requesterOrigin, pm.originOf!(p.peerId)))
       .map(p => {
         const peer = p as any;
         return peer.pubkey instanceof Uint8Array && typeof peer.powCounter === 'number'

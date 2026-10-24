@@ -1,3 +1,5 @@
+import sodium from '../crypto/sodium';
+
 /**
  * NetGroup — 隣人の「ネットワーク上の出所」をまとめた粗い区分。
  *
@@ -78,4 +80,67 @@ function expandV6(addr: string): string[] | null {
  */
 export function groupCap(maxDegree: number, distinctGroupsSeen: number): number {
   return Math.max(1, Math.ceil(maxDegree / Math.max(1, distinctGroupsSeen)));
+}
+
+// ── 経路の出所 (同じ家・同じ端末かどうか) ──
+
+/** 私設アドレス・mDNS の相手 (同じ LAN にいる = 同じ公開 IP の仲間) */
+export const ORIGIN_LAN = 'lan';
+/** 比べられない (統計が取れない・TURN リレー経由など) */
+export const ORIGIN_UNKNOWN = 'unknown';
+/** まだ求めていない (接続直後)。経路には使わない */
+export const ORIGIN_PENDING = 'pending';
+
+/** 出所の鍵に混ぜる乱数 (起動ごとに変わる)。鍵から IP を逆算できないようにする */
+let originSalt: Uint8Array | null = null;
+
+/**
+ * 経路の出所の鍵。オニオンの各段 (自分・Guard・M1) が同じ家・同じ端末にならないように比べる。
+ *
+ *   私設アドレス・mDNS (アドレスの載らない host 候補を含む) → 'lan'
+ *   IPv4         → アドレスそのもの (/32。家庭は公開 IP を 1 つ共有する)
+ *   IPv6         → 上位 56 ビット (家庭に配られる範囲。同じ家の端末はここが同じ)
+ *   TURN リレー・取れない → 'unknown'
+ *
+ * ★ IP は持たない。起動ごとの乱数を鍵にしたハッシュにして、同じかどうかだけを比べる。
+ * ★ Sybil の枠 ({@link netGroupOf}、/16) より細かい。こちらは「同じ人の端末」を見分けるためのもの。
+ */
+export function originKeyOf(address: string | undefined | null, candidateType?: string | null): string {
+  if (candidateType === 'relay') return ORIGIN_UNKNOWN;
+  // 統計にアドレスが載らない host 候補は mDNS (.local) の相手。直接届く host 同士 = 同じ LAN
+  if (!address) return candidateType === 'host' ? ORIGIN_LAN : ORIGIN_UNKNOWN;
+  const addr = address.trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (addr.endsWith('.local')) return ORIGIN_LAN;
+
+  let material: string | null = null;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(addr);
+  if (v4) {
+    const octets = v4.slice(1, 5).map(Number);
+    if (octets.some(o => o > 255)) return ORIGIN_UNKNOWN;
+    if (isPrivateV4(octets[0], octets[1])) return ORIGIN_LAN;
+    material = `v4:${octets.join('.')}`;
+  } else if (addr.includes(':')) {
+    const hextets = expandV6(addr);
+    if (!hextets) return ORIGIN_UNKNOWN;
+    const first = parseInt(hextets[0], 16);
+    if ((first & 0xfe00) === 0xfc00 || (first & 0xffc0) === 0xfe80 || hextets.join(':') === '0:0:0:0:0:0:0:1') {
+      return ORIGIN_LAN;
+    }
+    // 上位 56 ビット = 先頭 3 つの hextet と 4 つ目の上位 8 ビット
+    material = `v6:${hextets.slice(0, 3).join(':')}:${(parseInt(hextets[3], 16) >> 8).toString(16)}`;
+  }
+  if (!material) return ORIGIN_UNKNOWN;
+
+  if (!originSalt) originSalt = crypto.getRandomValues(new Uint8Array(32));
+  return 'o:' + sodium.to_hex(sodium.crypto_generichash(16, sodium.from_string(material), originSalt));
+}
+
+/**
+ * 2 つの出所が同じか。比べられないもの (unknown) は同じとみなさない。
+ * まだ求めていないもの (pending) は同じとみなす (分かるまでは使わない)。
+ */
+export function sameOrigin(a: string, b: string): boolean {
+  if (a === ORIGIN_UNKNOWN || b === ORIGIN_UNKNOWN) return false;
+  if (a === ORIGIN_PENDING || b === ORIGIN_PENDING) return true;
+  return a === b;
 }

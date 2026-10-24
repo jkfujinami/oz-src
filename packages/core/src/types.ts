@@ -72,6 +72,12 @@ export interface IPeerManager {
   readonly outboundCount?: number;
   /** 次数が上限を超えていれば、Sybil 対策の優先順位に従って調整する */
   rebalance?(newcomerId?: PeerId): void;
+  /** 相手の出所の鍵 ('lan' / 'unknown' / 'pending' / ハッシュ)。PeerManager を参照 */
+  originOf?(peerId: PeerId): string;
+  /** 自分と同じ出所か (同じ LAN・同じ公開 IP) */
+  isOwnOrigin?(origin: string): boolean;
+  /** 経路の出所の制限を外してよいか (開発用の網だけ true) */
+  readonly sameOriginHopsAllowed?: boolean;
   on(event: string, handler: (...args: any[]) => void): void;
   off(event: string, handler: (...args: any[]) => void): void;
 }

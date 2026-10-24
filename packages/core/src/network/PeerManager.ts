@@ -7,7 +7,7 @@ import type {
 } from '../types';
 import { WebRTCPeer } from './WebRTCPeer';
 import { RingPosition } from './RingPosition';
-import { groupCap } from './NetGroup';
+import { groupCap, ORIGIN_LAN, ORIGIN_PENDING, ORIGIN_UNKNOWN } from './NetGroup';
 import { RING_MESH } from '../constants';
 import { WireCodec, WIRE_BODY_BYTES, MAX_PEX_ENTRIES, MAX_ICE_CANDIDATE_BYTES, MAX_CATCHUP_FRAME_BYTES, MAX_LEASESET_FRAME_BYTES, MAX_TUNNEL_FRAME_BYTES, MAX_OZZY_FRAME_BYTES, MAX_OZZY_WORKER_FRAME_BYTES } from './wire/WireCodec';
 import { LEASESET_MAX_BYTES } from './storage/LeaseSet';
@@ -244,6 +244,10 @@ export class PeerManager implements IPeerManager {
   private stopped = false;
   private readonly allowMissingDtlsFingerprint: boolean;
   private readonly iceServersProvider?: () => RTCIceServer[];
+  /** 経路の出所の制限を外してよいか (開発用の網だけ。{@link sameOriginHopsAllowed}) */
+  private readonly allowSameOriginHops: () => boolean;
+  /** 自分の公開側の出所 (相手から見えている自分。接続のたびに STUN などで分かった分) */
+  private selfOrigins = new Set<string>();
 
   public readonly myPeerId: PeerId;
   public readonly myPosition: number;
@@ -274,9 +278,15 @@ export class PeerManager implements IPeerManager {
       keepTrackerAttached?: boolean;
       /** WebRTC に渡す STUN の一覧を、接続のたびに返す (トラッカーが後から変わっても追従する) */
       iceServers?: () => RTCIceServer[];
+      /**
+       * 経路の各段 (自分・Guard・M1) が同じ家・同じ端末でもよいか。
+       * ★ 開発用の網 (トラッカーが自分の端末) だけで true を返すこと。実際の網では匿名性が無くなる。
+       */
+      allowSameOriginHops?: () => boolean;
     } = {},
   ) {
     this.iceServersProvider = options.iceServers;
+    this.allowSameOriginHops = options.allowSameOriginHops ?? (() => false);
     this.maxDegreeLimit = options.maxDegree ?? RING_MESH.MAX_DEGREE;
     this.keepTrackerAttached = options.keepTrackerAttached ?? false;
     this.maxPendingPeers = options.maxPendingPeers ?? (this.keepTrackerAttached ? MAX_PENDING_PEERS_GUARD : MAX_PENDING_PEERS);
@@ -439,6 +449,7 @@ export class PeerManager implements IPeerManager {
     // 出所の区分 (getStats) を求めてから行う。取れなくても 'unknown' として進む。
     void peer.resolveNetGroup().then((group) => {
       this.noteGroup(group);
+      for (const origin of peer.localOrigins) this.noteSelfOrigin(origin);
       this.rebalance(peerId);
     });
   }
@@ -612,6 +623,34 @@ export class PeerManager implements IPeerManager {
   /** ハンドシェイク済みのピアだけを返す。 */
   public get verifiedPeers(): WebRTCPeer[] {
     return Array.from(this._peers.values()).filter((p) => p.isConnected && p.isVerified);
+  }
+
+  /**
+   * 相手の出所の鍵 ({@link originKeyOf})。オニオンの各段が同じ家・同じ端末にならないように比べる。
+   * まだ求めていなければ 'pending'。出所を持たない相手 (テストの模擬など) は 'unknown'。
+   */
+  public originOf(peerId: PeerId): string {
+    const peer: any = this._peers.get(peerId);
+    if (!peer) return ORIGIN_UNKNOWN;
+    if (peer.origin === null) return ORIGIN_PENDING;
+    return typeof peer.origin === 'string' ? peer.origin : ORIGIN_UNKNOWN;
+  }
+
+  /** 自分と同じ出所か (同じ LAN にいる相手、または自分と同じ公開 IP の相手) */
+  public isOwnOrigin(origin: string): boolean {
+    return origin === ORIGIN_LAN || this.selfOrigins.has(origin);
+  }
+
+  /** 接続で分かった自分の公開側の出所を覚える (メモリだけ。数を抑える) */
+  public noteSelfOrigin(origin: string): void {
+    if (origin === ORIGIN_LAN || origin === ORIGIN_UNKNOWN || origin === ORIGIN_PENDING) return;
+    if (this.selfOrigins.size >= 16 && !this.selfOrigins.has(origin)) return;
+    this.selfOrigins.add(origin);
+  }
+
+  /** 経路の出所の制限を外してよいか (開発用の網だけ true) */
+  public get sameOriginHopsAllowed(): boolean {
+    return this.allowSameOriginHops();
   }
 
   /** 公開鍵が判明している検証済みピアのリスト (Onion Circuit 構築用) */

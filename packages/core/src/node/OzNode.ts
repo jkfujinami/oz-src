@@ -10,7 +10,7 @@ import { KeyManager } from '../crypto/KeyManager';
 import { Identity } from '../crypto/Identity';
 import { MessageDispatcher } from '../network/MessageDispatcher';
 import { SignalingClient, TrackerNotConfiguredError } from '../network/SignalingClient';
-import { parseTrackerUrl } from '../network/TrackerUrl';
+import { isLoopbackTrackerUrl, parseTrackerUrl } from '../network/TrackerUrl';
 import { parseIceServers, resolveIceServers, deriveStunFromTracker, DEFAULT_STUN_SERVER, type IceServersResult } from '../network/IceServers';
 import { RateLimiter } from '../network/RateLimiter';
 import { PeerManager } from '../network/PeerManager';
@@ -363,6 +363,8 @@ export class OzNode {
     const peerManager = new PeerManager(nodeIdentity, dispatcher, signaling, {
       rateLimiter,
       iceServers,
+      // ★ 経路の各段が同じ端末でもよいのは、トラッカーが自分の端末 (開発用の網) のときだけ
+      allowSameOriginHops: () => isLoopbackTrackerUrl(signaling.url ?? null),
       ...(isGuardRole ? { maxDegree: GUARD_MAX_DEGREE, keepTrackerAttached: true } : {}),
     });
     const identity = new Identity();
