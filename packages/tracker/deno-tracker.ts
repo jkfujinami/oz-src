@@ -18,10 +18,18 @@ declare const Deno: {
   env: { get(key: string): string | undefined };
   serve(
     options: { port?: number },
-    handler: (req: Request) => Response | Promise<Response>,
+    handler: (req: Request, info: { remoteAddr?: { hostname?: string } }) => Response | Promise<Response>,
   ): unknown;
-  upgradeWebSocket(req: Request): { socket: WebSocket; response: Response };
+  upgradeWebSocket(req: Request, options?: { idleTimeout?: number }): { socket: WebSocket; response: Response };
 };
+
+/** 数値の環境変数 (未設定・不正なら undefined = 既定値) */
+function envInt(name: string): number | undefined {
+  const raw = Deno.env.get(name);
+  if (raw === undefined || raw.trim() === '') return undefined;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 ? n : undefined;
+}
 
 const allowedHostsEnv = Deno.env.get('OZ_TRACKER_ALLOWED_HOSTS');
 const allowedHosts = allowedHostsEnv
@@ -31,14 +39,20 @@ const allowedHosts = allowedHostsEnv
       .filter(Boolean)
   : undefined;
 
+// ★ 同時接続の上限 (EdgeTrackerHub の既定: 登録 2048・登録前 256・1 アドレス 16)。
+//   OZ_TRACKER_MAX_PER_ADDRESS=0 で 1 アドレスあたりの上限を外す (手前のプロキシのアドレスしか
+//   見えない環境で、全員が同じアドレスに数えられてしまう場合)。
 const hub = new EdgeTrackerHub({
   allowedHosts,
   broadcastChannelName: 'oz-tracker-v3',
+  maxSessions: envInt('OZ_TRACKER_MAX_SESSIONS'),
+  maxPendingConnections: envInt('OZ_TRACKER_MAX_PENDING'),
+  maxConnectionsPerAddress: envInt('OZ_TRACKER_MAX_PER_ADDRESS'),
 });
 
 const port = Number(Deno.env.get('PORT') ?? '8080');
 
-Deno.serve({ port }, (req: Request): Response => {
+Deno.serve({ port }, (req, info): Response => {
   const url = new URL(req.url);
 
   if (url.pathname === '/health' || url.pathname === '/ozzy/v2/tracker-status') {
@@ -48,6 +62,7 @@ Deno.serve({ port }, (req: Request): Response => {
         runtime: 'deno-deploy',
         protocolVersion: 3,
         activeSessions: hub.sessionCount,
+        connections: hub.connectionCount,
       }),
       {
         status: 200,
@@ -65,14 +80,22 @@ Deno.serve({ port }, (req: Request): Response => {
       return new Response('Expected Upgrade: websocket on /ws', { status: 426 });
     }
 
+    // 送信元アドレス (同時接続数を数えるだけ。ログにも応答にも出さない)
+    const remoteAddress = info?.remoteAddr?.hostname ?? null;
+    // ★ 上限を超えていれば WebSocket を作らずに断る (作ってから切るより軽い)
+    if (!hub.canAccept(remoteAddress)) {
+      return new Response('Tracker is busy', { status: 503, headers: { 'Retry-After': '30' } });
+    }
+
     try {
       const hostHeader = req.headers.get('x-forwarded-host') ?? req.headers.get('host') ?? url.host;
-      const { socket, response } = Deno.upgradeWebSocket(req);
+      // 応答 (pong) の無い相手は 30 秒で切る (Deno の既定値。明示しておく)
+      const { socket, response } = Deno.upgradeWebSocket(req, { idleTimeout: 30 });
       socket.binaryType = 'arraybuffer';
 
       socket.onopen = () => {
         try {
-          hub.acceptConnection(socket, hostHeader);
+          hub.acceptConnection(socket, hostHeader, remoteAddress);
         } catch (err) {
           console.error('[tracker:open:err]', err);
         }

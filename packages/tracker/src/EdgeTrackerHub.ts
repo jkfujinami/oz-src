@@ -25,6 +25,21 @@ export interface EdgeTrackerOptions {
   allowedHosts?: string[];
   /** 同時セッション上限 (デフォルト: 2048) */
   maxSessions?: number;
+  /**
+   * 登録 (JOIN) 前の接続の同時上限 (デフォルト: 256)。
+   * ★ 登録前の接続はだれでも作れる。上限が無いと、接続を大量に張るだけでメモリを使い切られる
+   *   (1 本あたり数十 KB)。
+   */
+  maxPendingConnections?: number;
+  /**
+   * 1 つの送信元アドレスからの同時接続数 (登録前・登録後の合計。デフォルト: 16、0 で無制限)。
+   * IPv6 は /64 単位で数える。アドレスが分からない接続には適用しない。
+   */
+  maxConnectionsPerAddress?: number;
+  /** 他の Isolate から知らされたピアを覚えておく時間 (デフォルト: 90,000ms) */
+  remotePeerTtlMs?: number;
+  /** 自分のセッションを他の Isolate へ知らせ直す間隔 (デフォルト: 30,000ms) */
+  announceIntervalMs?: number;
   /** 1回の JOIN で返すランダムピア数の上限 (デフォルト: 8, 最大: 32) */
   peersPerJoin?: number;
   /** ハンドシェイクタイムアウト (デフォルト: 10,000ms) */
@@ -73,6 +88,11 @@ const FRAME_LIMITS = {
 } as const;
 
 const HOST_RE = /^(?:[a-z0-9.-]{1,253}|\[[0-9a-f:.]{2,45}\])(?::\d{1,5})?$/;
+const PEER_ID_HEX_RE = /^[0-9a-f]{32}$/;
+/** 他の Isolate から知らされたピアを覚えておく数の上限 */
+const MAX_REMOTE_PEERS = 8192;
+/** 1 通の alive で知らせるピアの数 */
+const ALIVE_CHUNK = 512;
 const PEER_ID_DOMAIN = new TextEncoder().encode('OZ/v3/peerid');
 const TRACKER_JOIN_DOMAIN = new TextEncoder().encode('OZ/v1/tracker-join');
 const utf8Enc = new TextEncoder();
@@ -92,6 +112,43 @@ function fromHex(hex: string): Uint8Array {
     out[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
   }
   return out;
+}
+
+/**
+ * 同時接続数を数えるための送信元アドレスの鍵。IPv6 は /64 単位 (1 台・1 家庭に配られる範囲)。
+ * ループバック・私設アドレス・取れないものは null (数えない)。
+ *
+ * ★ 手前のプロキシのアドレスしか見えない環境では、全員が同じアドレスに見える。
+ *   そのときに全員をまとめて数えてしまわないよう、私設アドレスは数えない。
+ * ★ アドレスはメモリ上で数えるだけで、ログにも応答にも出さない。
+ */
+export function addressKey(address: string | null | undefined): string | null {
+  if (typeof address !== 'string') return null;
+  let a = address.trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (a.startsWith('::ffff:') && a.includes('.')) a = a.slice(7);
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(a);
+  if (v4) {
+    const octets = [1, 2, 3, 4].map(i => Number(v4[i]));
+    if (octets.some(o => o > 255)) return null;
+    const [o1, o2] = octets;
+    const internal =
+      o1 === 0 || o1 === 10 || o1 === 127 || (o1 === 172 && o2 >= 16 && o2 <= 31) ||
+      (o1 === 192 && o2 === 168) || (o1 === 169 && o2 === 254);
+    return internal ? null : octets.join('.');
+  }
+  if (!a.includes(':')) return null;
+  const parts = a.split('%')[0].split('::');
+  if (parts.length > 2) return null;
+  const head = parts[0] ? parts[0].split(':') : [];
+  const tail = parts.length === 2 && parts[1] ? parts[1].split(':') : [];
+  if ([...head, ...tail].some(h => !/^[0-9a-f]{1,4}$/.test(h))) return null;
+  const missing = 8 - head.length - tail.length;
+  if (missing < 0 || (parts.length === 1 && missing !== 0)) return null;
+  const full = [...head, ...Array(missing).fill('0'), ...tail].map(h => parseInt(h, 16));
+  // ::1・未指定 (::)・リンクローカル (fe80::/10)・ULA (fc00::/7) は数えない
+  if (full.slice(0, 7).every(h => h === 0) && full[7] <= 1) return null;
+  if ((full[0] & 0xffc0) === 0xfe80 || (full[0] & 0xfe00) === 0xfc00) return null;
+  return full.slice(0, 4).map(h => h.toString(16)).join(':') + '::/64';
 }
 
 function normalizeHost(host: string | null | undefined): string | null {
@@ -220,6 +277,10 @@ interface ConnState {
   ws: MinimalWebSocket;
   nonce: Uint8Array;
   host: string | null;
+  /** 送信元アドレスの鍵 ({@link addressKey})。数えない接続は null */
+  address: string | null;
+  /** 登録 (JOIN) を終えたか。同じ peerId の登録し直しで peerIdHex が消えても true のまま */
+  joined: boolean;
   peerIdHex: string | null;
   peerIdBytes: Uint8Array | null;
   timer: ReturnType<typeof setTimeout> | null;
@@ -230,8 +291,10 @@ interface ConnState {
 }
 
 interface BroadcastMessage {
-  kind: 'join' | 'leave' | 'relay';
-  peerIdHex: string;
+  kind: 'join' | 'leave' | 'relay' | 'alive';
+  peerIdHex?: string;
+  /** alive: この Isolate に今いるピア (知らせ直し。後から起きた Isolate も知れるように) */
+  peerIds?: string[];
   targetPeerIdHex?: string;
   frameBytes?: number[];
 }
@@ -240,43 +303,95 @@ export class EdgeTrackerHub {
   private readonly connections = new Map<MinimalWebSocket, ConnState>();
   private readonly sessions = new Map<string, { ws: MinimalWebSocket; peerIdBytes: Uint8Array }>();
   private readonly remotePeers = new Map<string, number>(); // peerIdHex -> seenAtMs (BroadcastChannel 経由)
+  private readonly perAddress = new Map<string, number>();
   private readonly allowedHosts: Set<string> | null;
   private readonly maxSessions: number;
+  private readonly maxPending: number;
+  private readonly maxPerAddress: number;
+  private readonly remotePeerTtlMs: number;
   private readonly peersPerJoin: number;
   private readonly handshakeTimeoutMs: number;
   private readonly bc: BroadcastChannel | null = null;
+  private announceTimer: ReturnType<typeof setInterval> | null = null;
+  /** 登録前の接続の数 */
+  private pending = 0;
 
   constructor(opts: EdgeTrackerOptions = {}) {
     this.allowedHosts = opts.allowedHosts
       ? new Set(opts.allowedHosts.map(h => normalizeHost(h)).filter((h): h is string => h !== null))
       : null;
     this.maxSessions = opts.maxSessions ?? 2048;
+    this.maxPending = opts.maxPendingConnections ?? 256;
+    this.maxPerAddress = opts.maxConnectionsPerAddress ?? 16;
+    this.remotePeerTtlMs = opts.remotePeerTtlMs ?? 90_000;
     this.peersPerJoin = Math.min(opts.peersPerJoin ?? 8, MAX_PEERS);
     this.handshakeTimeoutMs = opts.handshakeTimeoutMs ?? 10_000;
 
     if (opts.broadcastChannelName && typeof BroadcastChannel !== 'undefined') {
       try {
         this.bc = new BroadcastChannel(opts.broadcastChannelName);
-        this.bc.onmessage = (ev: MessageEvent<BroadcastMessage>) => {
-          const data = ev.data;
-          if (!data || typeof data !== 'object') return;
-          if (data.kind === 'join' && typeof data.peerIdHex === 'string') {
-            this.remotePeers.set(data.peerIdHex, Date.now());
-          } else if (data.kind === 'leave' && typeof data.peerIdHex === 'string') {
-            this.remotePeers.delete(data.peerIdHex);
-          } else if (
-            data.kind === 'relay' &&
-            typeof data.targetPeerIdHex === 'string' &&
-            Array.isArray(data.frameBytes)
-          ) {
-            const localTarget = this.sessions.get(data.targetPeerIdHex);
-            if (localTarget) {
-              this.safeSend(localTarget.ws, new Uint8Array(data.frameBytes));
-            }
-          }
-        };
+        this.bc.onmessage = (ev: MessageEvent<BroadcastMessage>) => this.handleBroadcast(ev.data);
+        // ★ 自分のセッションを定期的に知らせ直す。join は 1 回しか流れないので、後から起きた Isolate は
+        //   ずっとつながっている相手 (Guard など) を知らないままになる。知らせ直しが途絶えた相手
+        //   (落ちた Isolate にいたピア) は remotePeerTtlMs で忘れる。
+        const interval = opts.announceIntervalMs ?? 30_000;
+        this.announceTimer = setInterval(() => this.announceAndPrune(), interval);
+        (this.announceTimer as unknown as { unref?: () => void }).unref?.();
       } catch {
         this.bc = null;
+      }
+    }
+  }
+
+  private handleBroadcast(data: BroadcastMessage | null | undefined): void {
+    if (!data || typeof data !== 'object') return;
+    if (
+      (data.kind === 'join' || data.kind === 'leave') &&
+      typeof data.peerIdHex === 'string' &&
+      PEER_ID_HEX_RE.test(data.peerIdHex)
+    ) {
+      if (data.kind === 'join') this.rememberRemote(data.peerIdHex);
+      else this.remotePeers.delete(data.peerIdHex);
+    } else if (data.kind === 'alive' && Array.isArray(data.peerIds)) {
+      for (const id of data.peerIds.slice(0, ALIVE_CHUNK)) {
+        if (typeof id === 'string' && PEER_ID_HEX_RE.test(id)) this.rememberRemote(id);
+      }
+    } else if (
+      data.kind === 'relay' &&
+      typeof data.targetPeerIdHex === 'string' &&
+      Array.isArray(data.frameBytes) &&
+      data.frameBytes.length <= FRAME_LIMITS.RELAY
+    ) {
+      const localTarget = this.sessions.get(data.targetPeerIdHex);
+      if (localTarget) {
+        this.safeSend(localTarget.ws, new Uint8Array(data.frameBytes));
+      }
+    }
+  }
+
+  private rememberRemote(peerIdHex: string): void {
+    if (!this.remotePeers.has(peerIdHex) && this.remotePeers.size >= MAX_REMOTE_PEERS) return;
+    this.remotePeers.set(peerIdHex, Date.now());
+  }
+
+  private isRemoteFresh(peerIdHex: string, now: number): boolean {
+    const seen = this.remotePeers.get(peerIdHex);
+    return seen !== undefined && now - seen <= this.remotePeerTtlMs;
+  }
+
+  /** 自分のセッションを知らせ直し、知らせ直しの途絶えた他の Isolate のピアを忘れる */
+  private announceAndPrune(): void {
+    const now = Date.now();
+    for (const [id, seen] of this.remotePeers) {
+      if (now - seen > this.remotePeerTtlMs) this.remotePeers.delete(id);
+    }
+    if (!this.bc || this.sessions.size === 0) return;
+    const ids = [...this.sessions.keys()];
+    for (let i = 0; i < ids.length; i += ALIVE_CHUNK) {
+      try {
+        this.bc.postMessage({ kind: 'alive', peerIds: ids.slice(i, i + ALIVE_CHUNK) } satisfies BroadcastMessage);
+      } catch {
+        return;
       }
     }
   }
@@ -285,15 +400,43 @@ export class EdgeTrackerHub {
     return this.sessions.size;
   }
 
+  /** 登録前・登録後を合わせた接続の数 */
+  public get connectionCount(): number {
+    return this.connections.size;
+  }
+
+  /**
+   * WebSocket を開く前の確認。上限を超えていれば false (呼び出し側は 503 を返し、WebSocket を作らない)。
+   * ★ 予約はしない。acceptConnection でも同じ確認をする。
+   */
+  public canAccept(remoteAddress?: string | null): boolean {
+    if (this.pending >= this.maxPending) return false;
+    if (this.connections.size >= this.maxSessions + this.maxPending) return false;
+    const key = addressKey(remoteAddress);
+    if (key && this.maxPerAddress > 0 && (this.perAddress.get(key) ?? 0) >= this.maxPerAddress) return false;
+    return true;
+  }
+
   /**
    * 新規 WebSocket 接続を受け入れ、即座に HELLO (0x01) フレームを送信する。
    */
-  public acceptConnection(ws: MinimalWebSocket, requestHostHeader: string | null | undefined): void {
+  public acceptConnection(
+    ws: MinimalWebSocket,
+    requestHostHeader: string | null | undefined,
+    remoteAddress?: string | null,
+  ): void {
+    if (!this.canAccept(remoteAddress)) {
+      this.reject(ws, 'capacity');
+      return;
+    }
     const nonce = crypto.getRandomValues(new Uint8Array(CHALLENGE_BYTES));
+    const address = addressKey(remoteAddress);
     const state: ConnState = {
       ws,
       nonce,
       host: normalizeHost(requestHostHeader),
+      address,
+      joined: false,
       peerIdHex: null,
       peerIdBytes: null,
       timer: null,
@@ -303,6 +446,8 @@ export class EdgeTrackerHub {
       lastRelayMs: Date.now(),
     };
     this.connections.set(ws, state);
+    this.pending++;
+    if (address) this.perAddress.set(address, (this.perAddress.get(address) ?? 0) + 1);
 
     state.timer = setTimeout(() => {
       state.timer = null;
@@ -356,6 +501,12 @@ export class EdgeTrackerHub {
     const state = this.connections.get(ws);
     if (!state) return;
     this.connections.delete(ws);
+    if (!state.joined) this.pending--;
+    if (state.address) {
+      const left = (this.perAddress.get(state.address) ?? 1) - 1;
+      if (left <= 0) this.perAddress.delete(state.address);
+      else this.perAddress.set(state.address, left);
+    }
     if (state.timer) {
       clearTimeout(state.timer);
       state.timer = null;
@@ -370,6 +521,10 @@ export class EdgeTrackerHub {
   }
 
   public destroy(): void {
+    if (this.announceTimer) {
+      clearInterval(this.announceTimer);
+      this.announceTimer = null;
+    }
     for (const [ws, state] of this.connections) {
       if (state.timer) clearTimeout(state.timer);
       try {
@@ -381,6 +536,8 @@ export class EdgeTrackerHub {
     this.connections.clear();
     this.sessions.clear();
     this.remotePeers.clear();
+    this.perAddress.clear();
+    this.pending = 0;
     try {
       this.bc?.close();
     } catch {
@@ -493,6 +650,10 @@ export class EdgeTrackerHub {
     this.sessions.set(peerIdHex, { ws, peerIdBytes });
     state.peerIdHex = peerIdHex;
     state.peerIdBytes = peerIdBytes;
+    if (!state.joined) {
+      state.joined = true;
+      this.pending--;
+    }
     if (state.timer) {
       clearTimeout(state.timer);
       state.timer = null;
@@ -507,7 +668,9 @@ export class EdgeTrackerHub {
         candidates.push(entry.peerIdBytes);
       }
     }
-    for (const [remoteHex] of this.remotePeers) {
+    const now = Date.now();
+    for (const [remoteHex, seen] of this.remotePeers) {
+      if (now - seen > this.remotePeerTtlMs) continue;
       if (remoteHex !== peerIdHex && !this.sessions.has(remoteHex)) {
         candidates.push(fromHex(remoteHex));
       }
@@ -555,7 +718,9 @@ export class EdgeTrackerHub {
     const target = this.sessions.get(targetPeerIdHex);
     if (target) {
       this.safeSend(target.ws, forwarded);
-    } else if (this.bc) {
+    } else if (this.bc && this.isRemoteFresh(targetPeerIdHex, Date.now())) {
+      // ★ 他の Isolate にいると分かっている相手宛てだけを流す。知らない宛先まで流すと、
+      //   でたらめな宛先の SDP (最大 16KB) が全 Isolate に複製されて配られる
       this.bc.postMessage({
         kind: 'relay',
         peerIdHex: state.peerIdHex,
