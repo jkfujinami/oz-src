@@ -33,6 +33,13 @@ if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
   exit 1
 fi
 
+# Windows 版・Linux 版を作る道具 (wine・mksquashfs) は Intel 用。Apple シリコンでは Rosetta が要る
+if [ "$(uname -m)" = "arm64" ] && ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+  echo "Rosetta が使えません (Windows 版・Linux 版を作れません)。次で入れてください:"
+  echo "  softwareupdate --install-rosetta --agree-to-license"
+  exit 1
+fi
+
 echo "== $VERSION を作ります (公開先: $RELEASE_REPO)"
 npm run build:core
 npm run test:desktop
