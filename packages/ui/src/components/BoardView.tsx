@@ -11,6 +11,7 @@ import { appendToken, replaceFileTokens } from "../lib/fileTokens";
 import { confirmLeave } from "../lib/transferGuard";
 import { copySecret } from "../lib/clipboard";
 import { byteBudget, describeSubmitError } from "../lib/postLimit";
+import { boardDisplayName } from "../lib/boardKeys";
 import { ThreadRanker, type ThreadMeta, createLogger } from "@oz/core";
 
 const log = createLogger('ui.board');
@@ -67,7 +68,7 @@ export default function BoardView({
       <div className="page-head">
         <div>
           <div className="eyebrow">OZ P2P BOARD</div>
-          <h1 className="page-title">板: {boardId}</h1>
+          <h1 className="page-title">板: {boardDisplayName(boardId)}</h1>
         </div>
         <div className="row row-wrap">
           {shareCode && (

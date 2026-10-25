@@ -12,6 +12,7 @@ import { appendToken } from "../lib/fileTokens";
 import { confirmLeave } from "../lib/transferGuard";
 import { navigate } from "../lib/route";
 import { byteBudget, describeSubmitError } from "../lib/postLimit";
+import { boardDisplayName } from "../lib/boardKeys";
 import { KeyManager, THREAD_LIMITS, createLogger, posterId } from "@oz/core";
 
 const log = createLogger('ui.thread');
@@ -125,7 +126,7 @@ export default function ThreadView({
         <h1 id="thread-title" className="page-title" style={{ marginTop: 8 }}>
           スレッド: {threadId.substring(0, 8)}
         </h1>
-        <div className="eyebrow" style={{ marginTop: 4 }}>板: {boardId}</div>
+        <div className="eyebrow" style={{ marginTop: 4 }}>板: {boardDisplayName(boardId)}</div>
       </div>
 
       <div id="posts-container" className="stack stack-sm">

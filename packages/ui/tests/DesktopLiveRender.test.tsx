@@ -8,6 +8,7 @@ import 'fake-indexeddb/auto';
 import BoardView from '../src/components/BoardView';
 import ThreadView from '../src/components/ThreadView';
 import { P2PContextForTest } from '../src/providers/P2PProvider';
+import { DEFAULT_BOARD_ID, publicBoardKey } from '../src/lib/boardKeys';
 import {
   BoardOrchestrator,
   ThreadOrchestrator,
@@ -28,7 +29,7 @@ import {
 
 const ME = 'aa'.repeat(16);
 const PEER = 'bb'.repeat(16);
-const BOARD_ID = 'vip';
+const BOARD_ID = DEFAULT_BOARD_ID;
 let BOARD_KEY: Uint8Array;
 
 class FakeStore {
@@ -111,9 +112,7 @@ function Wrap({ value, children }: { value: any; children: React.ReactNode }) {
 
 beforeAll(async () => {
   await sodium.ready;
-  BOARD_KEY = KeyManager.cryptoHash(
-    new TextEncoder().encode('OZ_LITE_VIP_DEFAULT_SEED'),
-  ).slice(0, 32);
+  BOARD_KEY = publicBoardKey(BOARD_ID)!;
 
   for (const m of ['log', 'warn', 'debug', 'error'] as const) {
     vi.spyOn(console, m).mockImplementation(() => {});

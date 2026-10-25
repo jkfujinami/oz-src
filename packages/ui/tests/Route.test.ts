@@ -35,11 +35,11 @@ describe('route: 経路は URL に出さない', () => {
     const seen: string[] = [];
     const off = subscribeRoute(() => seen.push(getRoute().board));
     navigate({ board: '../evil' });
-    expect(getRoute()).toEqual({ board: 'vip' });
+    expect(getRoute()).toEqual({ board: 'zatsudan' });
     navigate({ board: 'abc' });
     off();
     navigate({ board: 'zzz' });
-    expect(seen).toEqual(['vip', 'abc']);
+    expect(seen).toEqual(['zatsudan', 'abc']);
   });
 
   it('resetRoute (ロック・消去) は経路を既定に戻し、URL を素のパスに置き換える', () => {
@@ -47,7 +47,7 @@ describe('route: 経路は URL に出さない', () => {
     window.history.replaceState(null, '', '/#board=abc&thread=t1');
     replaceState.mockClear();
     resetRoute();
-    expect(getRoute()).toEqual({ board: 'vip' });
+    expect(getRoute()).toEqual({ board: 'zatsudan' });
     expect(replaceState).toHaveBeenCalledWith(null, '', window.location.pathname);
     expect(window.location.hash).toBe('');
     expect(pushState).not.toHaveBeenCalled();

@@ -159,11 +159,11 @@ describe('Desktop UI Rendering & Workflows (OZ Specification)', () => {
     it('初期状態で板タイトルと新スレを立てるボタンが表示される', () => {
       render(
         <P2PProvider>
-          <BoardView boardId="vip" />
+          <BoardView boardId="zatsudan" />
         </P2PProvider>,
       );
 
-      expect(screen.getByText('板: vip')).toBeTruthy();
+      expect(screen.getByText('板: 雑談')).toBeTruthy();
       const newThreadBtn = screen.getByText('新スレを立てる');
       expect(newThreadBtn).toBeTruthy();
     });
@@ -171,7 +171,7 @@ describe('Desktop UI Rendering & Workflows (OZ Specification)', () => {
     it('新スレを立てるボタンをクリックするとフォームが展開され、中止で閉じることができる', () => {
       render(
         <P2PProvider>
-          <BoardView boardId="vip" />
+          <BoardView boardId="zatsudan" />
         </P2PProvider>,
       );
 
@@ -191,7 +191,7 @@ describe('Desktop UI Rendering & Workflows (OZ Specification)', () => {
     it('スレッドタイトルが空の場合は作成ボタンが無効化される', () => {
       render(
         <P2PProvider>
-          <BoardView boardId="vip" />
+          <BoardView boardId="zatsudan" />
         </P2PProvider>,
       );
 
@@ -210,7 +210,7 @@ describe('Desktop UI Rendering & Workflows (OZ Specification)', () => {
       const threadId = 'abcdef1234567890';
       render(
         <P2PProvider>
-          <ThreadView boardId="vip" threadId={threadId} />
+          <ThreadView boardId="zatsudan" threadId={threadId} />
         </P2PProvider>,
       );
 
@@ -221,18 +221,18 @@ describe('Desktop UI Rendering & Workflows (OZ Specification)', () => {
 
     it('板に戻るボタンを押すと該当の板へ戻る (URL には板 ID を書かない)', () => {
       const threadId = 'abcdef1234567890';
-      window.location.hash = `#board=vip&thread=${threadId}`;
+      window.location.hash = `#board=zatsudan&thread=${threadId}`;
 
       render(
         <P2PProvider>
-          <ThreadView boardId="vip" threadId={threadId} />
+          <ThreadView boardId="zatsudan" threadId={threadId} />
         </P2PProvider>,
       );
 
       const backBtn = screen.getByText('← 板に戻る');
       fireEvent.click(backBtn);
 
-      expect(getRoute()).toEqual({ board: 'vip' });
+      expect(getRoute()).toEqual({ board: 'zatsudan' });
       expect(window.location.hash).toBe('');
     });
 
@@ -240,7 +240,7 @@ describe('Desktop UI Rendering & Workflows (OZ Specification)', () => {
       const threadId = 'abcdef1234567890';
       render(
         <P2PProvider>
-          <ThreadView boardId="vip" threadId={threadId} />
+          <ThreadView boardId="zatsudan" threadId={threadId} />
         </P2PProvider>,
       );
 
@@ -260,7 +260,7 @@ describe('Desktop UI Rendering & Workflows (OZ Specification)', () => {
       await waitFor(() => {
         expect(screen.getByText('パスワードを設定')).toBeTruthy();
       });
-      expect(screen.queryByText('板: vip')).toBeNull();
+      expect(screen.queryByText('板: 雑談')).toBeNull();
       // 初回設定の画面で、守れないことを先に読めるようにしてある
       expect(screen.getByText('守れないこと')).toBeTruthy();
     });
@@ -294,7 +294,7 @@ describe('Desktop UI Rendering & Workflows (OZ Specification)', () => {
         act(() => { navigate({ board: 'abc123', thread: 'deadbeef' }); });
         window.history.replaceState(null, '', '/#board=abc123');
         await act(async () => { send!('lock'); });
-        expect(getRoute()).toEqual({ board: 'vip' });
+        expect(getRoute()).toEqual({ board: 'zatsudan' });
         expect(window.location.hash).toBe('');
         expect((window as any).electronAPI.clearCaches).toHaveBeenCalled();
       } finally {
@@ -334,7 +334,7 @@ describe('Desktop UI Rendering & Workflows (OZ Specification)', () => {
       render(<P2PProvider><RouterView /></P2PProvider>);
 
       expect(screen.getByText('OZ')).toBeTruthy();
-      expect(screen.getByText('板: vip')).toBeTruthy();
+      expect(screen.getByText('板: 雑談')).toBeTruthy();
       expect(window.location.hash).toBe('');
     });
 
@@ -345,17 +345,17 @@ describe('Desktop UI Rendering & Workflows (OZ Specification)', () => {
       await waitFor(() => expect(window.location.hash).toBe(''));
       expect(window.location.href).not.toContain('AAAA');
       expect(screen.getByText(/共有コードを受け取っている場合/)).toBeTruthy();
-      expect(screen.getByText('板: vip')).toBeTruthy(); // 鍵付きリンクの板へは飛ばない
+      expect(screen.getByText('板: 雑談')).toBeTruthy(); // 鍵付きリンクの板へは飛ばない
     });
 
     it('ハッシュ変更により BoardView と ThreadView の切り替えが正しく反映される', async () => {
-      window.location.hash = '#board=vip';
+      window.location.hash = '#board=zatsudan';
       render(<P2PProvider><RouterView /></P2PProvider>);
 
-      expect(screen.getByText('板: vip')).toBeTruthy();
+      expect(screen.getByText('板: 雑談')).toBeTruthy();
 
       // 移行前の画面部品が location.hash を書き換えても、経路に取り込んで URL は素に戻す
-      window.location.hash = '#board=vip&thread=9876543210abcdef';
+      window.location.hash = '#board=zatsudan&thread=9876543210abcdef';
       window.dispatchEvent(new HashChangeEvent('hashchange'));
 
       await waitFor(() => {
@@ -366,10 +366,10 @@ describe('Desktop UI Rendering & Workflows (OZ Specification)', () => {
 
     it('navigate で板・スレッドが切り替わる', async () => {
       render(<P2PProvider><RouterView /></P2PProvider>);
-      await act(async () => { navigate({ board: 'vip', thread: '1234567890abcdef' }); });
+      await act(async () => { navigate({ board: 'zatsudan', thread: '1234567890abcdef' }); });
       expect(screen.getByText('スレッド: 12345678')).toBeTruthy();
-      await act(async () => { navigate({ board: 'vip' }); });
-      expect(screen.getByText('板: vip')).toBeTruthy();
+      await act(async () => { navigate({ board: 'zatsudan' }); });
+      expect(screen.getByText('板: 雑談')).toBeTruthy();
     });
   });
 });

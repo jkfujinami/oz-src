@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useP2P } from '../providers/P2PProvider';
 import { KeyManager, type BoardRecord } from '@oz/core';
-import { DEFAULT_BOARD_ID, newBoardId, parseShareCode } from '../lib/boardKeys';
+import { DEFAULT_BOARD_ID, PUBLIC_BOARDS, boardDisplayName, isPublicBoardId, newBoardId, parseShareCode } from '../lib/boardKeys';
 import { navigate, useRoute } from '../lib/route';
 import { useAppConfig } from '../providers/AppConfig';
 import { describeGuardStatus, type GuardTone } from '../lib/guardStatus';
@@ -91,6 +91,11 @@ export function Sidebar({
       setImportError('共有コードの形式が正しくありません');
       return;
     }
+    // 公開板は共有コードなしで読める。公開板の ID を持つ共有コードは、公開板のすり替えを狙ったもの
+    if (isPublicBoardId(parsed.boardId)) {
+      setImportError('公開板の共有コードは使えません。公開板は、サイドバーからそのまま開けます');
+      return;
+    }
     await db.saveBoard(parsed.boardId, parsed.key);
     setImportText('');
     setImportError(null);
@@ -112,7 +117,7 @@ export function Sidebar({
 
   const online = peerCount > 0;
   const trackerMissing = !!node && !trackerUrl;
-  const savedBoards = boards.filter(b => b.boardId !== DEFAULT_BOARD_ID);
+  const savedBoards = boards.filter(b => !isPublicBoardId(b.boardId));
 
   return (
     <aside className="sidebar" aria-label="サイドバー" data-section={section}>
@@ -143,7 +148,7 @@ export function Sidebar({
 
       <div className="side-group side-boards">
         <div className="side-label">板</div>
-        {[DEFAULT_BOARD_ID, ...savedBoards.map(b => b.boardId)].map(id => (
+        {[...PUBLIC_BOARDS.map(b => b.id), ...savedBoards.map(b => b.boardId)].map(id => (
           <button
             key={id}
             type="button"
@@ -152,7 +157,7 @@ export function Sidebar({
             aria-current={section === 'board' && route.board === id ? 'page' : undefined}
             onClick={() => openBoard(id)}
           >
-            {shortBoardId(id)}
+            {isPublicBoardId(id) ? boardDisplayName(id) : shortBoardId(id)}
           </button>
         ))}
         <button className="side-item side-sub side-action" onClick={handleCreatePrivateBoard} disabled={!db}>

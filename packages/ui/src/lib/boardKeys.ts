@@ -1,7 +1,17 @@
 import { KeyManager, type IndexedDBStore } from '@oz/core';
 
-/** 鍵を共有しなくても誰でも読める公開板 */
-export const DEFAULT_BOARD_ID = 'vip';
+/**
+ * 鍵を共有しなくても誰でも読める公開板 (サイドバーに並べる順)。
+ * 鍵は ID から決まる ({@link publicBoardKey}) ので、全員が同じ板を読み書きできる。
+ * ★ ID を変えると別の板になる (前の ID の板の投稿は見えなくなる)。
+ */
+export const PUBLIC_BOARDS: ReadonlyArray<{ readonly id: string; readonly name: string }> = [
+  { id: 'zatsudan', name: '雑談' },
+  { id: 'files', name: 'ファイル共有スレッド' },
+];
+
+/** 起動したとき・板が分からないときに開く板 */
+export const DEFAULT_BOARD_ID = PUBLIC_BOARDS[0].id;
 
 const BOARD_ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -10,8 +20,20 @@ export function isBoardId(id: unknown): id is string {
   return typeof id === 'string' && BOARD_ID_RE.test(id);
 }
 
-export function defaultBoardKey(): Uint8Array {
-  return KeyManager.cryptoHash(new TextEncoder().encode('OZ_LITE_VIP_DEFAULT_SEED')).slice(0, 32);
+/** 公開板か */
+export function isPublicBoardId(id: string): boolean {
+  return PUBLIC_BOARDS.some((b) => b.id === id);
+}
+
+/** 公開板の鍵 (`OZ/v1/public-board/<ID>` のハッシュの先頭 32 バイト)。公開板でなければ null */
+export function publicBoardKey(id: string): Uint8Array | null {
+  if (!isPublicBoardId(id)) return null;
+  return KeyManager.cryptoHash(new TextEncoder().encode(`OZ/v1/public-board/${id}`)).slice(0, 32);
+}
+
+/** 画面に出す板の名前。公開板は名前、秘密の板は ID */
+export function boardDisplayName(id: string): string {
+  return PUBLIC_BOARDS.find((b) => b.id === id)?.name ?? id;
 }
 
 /** 新しい板 ID (暗号論的乱数) */
@@ -49,12 +71,14 @@ export function parseShareCode(text: string): { boardId: string; key: Uint8Array
 }
 
 /**
- * 板の鍵を解決する。暗号化 DB に保存したもの → 公開板の既定鍵、の順に探す。
+ * 板の鍵を解決する。公開板は公開の鍵、それ以外は暗号化 DB に保存したもの。
+ *
+ * ★ 公開板は、端末に同じ ID の鍵が保存されていても公開の鍵を使う。
+ *   公開板の ID を持つ共有コードを読み込ませて、公開板を別の板にすり替えさせないため。
  */
 export async function resolveBoardKey(boardId: string, db: IndexedDBStore | null): Promise<Uint8Array | null> {
-  if (db) {
-    const saved = await db.getBoardKey(boardId).catch(() => null);
-    if (saved) return saved;
-  }
-  return boardId === DEFAULT_BOARD_ID ? defaultBoardKey() : null;
+  const pub = publicBoardKey(boardId);
+  if (pub) return pub;
+  if (!db) return null;
+  return db.getBoardKey(boardId).catch(() => null);
 }
