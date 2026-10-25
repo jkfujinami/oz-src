@@ -43,7 +43,7 @@ Installers for macOS, Windows and Linux are on the [Releases](https://github.com
 
 The builds are **not code-signed**, because signing ties an Apple or Microsoft developer account to a real identity.
 
-- **macOS:** right-click OZ in Applications and choose **Open** the first time.
+- **macOS:** the first time, try to open OZ in Applications and close the warning, then go to **System Settings → Privacy & Security** and click **Open Anyway**. On macOS 14 and earlier, right-click OZ and choose **Open** instead.
 - **Windows:** SmartScreen warns about an unknown publisher. Choose **More info → Run anyway**.
 - **Linux:** `chmod +x OZ-*.AppImage` and run it.
 

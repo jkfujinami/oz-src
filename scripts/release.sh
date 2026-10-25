@@ -71,7 +71,7 @@ cat > "$NOTES" <<'EOF'
 Installers for macOS, Windows and Linux. Check them against `SHA256SUMS.txt`.
 
 The builds are not code-signed.
-- **macOS:** right-click OZ in Applications and choose **Open** the first time.
+- **macOS:** the first time, try to open OZ in Applications and close the warning, then go to **System Settings → Privacy & Security** and click **Open Anyway**. On macOS 14 and earlier, right-click OZ and choose **Open** instead.
 - **Windows:** when SmartScreen warns about an unknown publisher, choose **More info → Run anyway**.
 - **Linux:** `chmod +x OZ-*.AppImage` and run it.
 
@@ -84,7 +84,7 @@ By using OZ you agree to the [Terms of Use](https://github.com/jkfujinami/Oz/blo
 macOS・Windows・Linux 向けのインストーラーです。ダウンロードしたファイルは `SHA256SUMS.txt` と照合して、改ざんされていないことを確認できます。
 
 コード署名は行っていないため、初回は次の方法で起動してください。
-- **macOS：** 「アプリケーション」フォルダの OZ を右クリックし、「開く」を選択してください。
+- **macOS：** 「アプリケーション」フォルダの OZ を一度開こうとして警告を閉じ、「システム設定」→「プライバシーとセキュリティ」で「このまま開く」を押してください。macOS 14 以前は、OZ を右クリックして「開く」を選択してください。
 - **Windows：** SmartScreen の警告が表示されたら、「詳細情報」→「実行」を選択してください。
 - **Linux：** `chmod +x OZ-*.AppImage` を実行してから起動してください。
 

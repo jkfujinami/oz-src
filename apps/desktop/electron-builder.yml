@@ -1,7 +1,9 @@
 # デスクトップ版の配布パッケージ (npm run dist:mac / dist:win / dist:linux)
 #
 # ★ コード署名はしない (Apple / Microsoft の開発者アカウントに身元が結び付くため)。
-#   macOS は初回に「開発元を確認できません」と出るので、右クリック →「開く」で起動してもらう。
+#   macOS は初回に「Apple が確認できない」と出るので、システム設定の「プライバシーとセキュリティ」で
+#   「このまま開く」を押してもらう (macOS 14 以前は右クリック →「開く」)。
+#   アプリ自体には ad-hoc 署名をかけ直す (scripts/afterPack.cjs。無いと「壊れている」扱いになる)。
 # ★ 描画側も main も Vite でまとめてあるので、node_modules は入れない (files に dist だけを並べる)。
 appId: org.ozprotocol.oz
 productName: OZ
@@ -19,6 +21,8 @@ extraResources:
   - from: build/tray@2x.png
     to: tray@2x.png
 asar: true
+# macOS のアプリに ad-hoc 署名をかけ直す (理由は scripts/afterPack.cjs)
+afterPack: scripts/afterPack.cjs
 publish: null
 # Electron はワークスペースの最上位の node_modules にある (ここからは版を読めない)。入れた版と合わせること
 electronVersion: 34.5.8
