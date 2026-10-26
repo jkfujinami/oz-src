@@ -1,6 +1,12 @@
 import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import 'fake-indexeddb/auto';
-import { parseTrackerUrl, TRACKER_URL_MAX_LENGTH } from '../../src/network/TrackerUrl';
+import {
+  parseTrackerUrl,
+  TRACKER_URL_MAX_LENGTH,
+  createTrackerString,
+  parseTrackerString,
+  resolveTrackerWebSocketUrl,
+} from '../../src/network/TrackerUrl';
 import { SignalingClient, TrackerNotConfiguredError } from '../../src/network/SignalingClient';
 import { PeerManager } from '../../src/network/PeerManager';
 import { MessageDispatcher } from '../../src/network/MessageDispatcher';
@@ -118,6 +124,40 @@ describe('トラッカー URL の検証', () => {
     expect(parseTrackerUrl('tracker.example.org')).toEqual({ ok: false, reason: 'invalid' });
     expect(parseTrackerUrl(undefined as unknown as string)).toEqual({ ok: false, reason: 'empty' });
     expect(parseTrackerUrl('wss://t.example/' + 'a'.repeat(TRACKER_URL_MAX_LENGTH))).toEqual({ ok: false, reason: 'too-long' });
+  });
+
+  it('ポート開放トラッカー用の oz-tracker:... トークンを生成・検証・展開でき、改ざんは拒否する', async () => {
+    const token = createTrackerString({ host: '203.0.113.42', port: 18787 });
+    expect(token.startsWith('oz-tracker:')).toBe(true);
+    // トークン文字列や単純 Base64 デコード結果に生 IP やポート番号が露出しない
+    expect(token).not.toContain('203.0.113.42');
+    expect(token).not.toContain('18787');
+    const rawDecoded = Buffer.from(token.slice('oz-tracker:'.length), 'base64url').toString('utf8');
+    expect(rawDecoded).not.toContain('203.0.113.42');
+
+    expect(parseTrackerString(token)).toEqual({
+      host: '203.0.113.42',
+      port: 18787,
+      tls: false,
+      path: '/ws',
+    });
+    expect(parseTrackerUrl(token)).toEqual({ ok: true, url: token });
+    expect(resolveTrackerWebSocketUrl(token)).toBe('ws://203.0.113.42:18787/ws');
+
+    // 1 文字でも改ざんされたら拒否する
+    const flipped = token.slice(0, -2) + (token.endsWith('A') ? 'B' : 'A') + token.slice(-1);
+    expect(parseTrackerString(flipped)).toBeNull();
+    expect(parseTrackerUrl(flipped)).toEqual({ ok: false, reason: 'invalid' });
+
+    // SignalingClient は url プロパティには oz-tracker:... を保持したまま、接続時のみ展開先 WebSocket に繋ぐ
+    const client = new SignalingClient(token, { WebSocketImpl: WS });
+    expect(client.url).toBe(token);
+    const p = client.connect(claim());
+    const ws = FakeWebSocket.last();
+    expect(ws.url).toBe('ws://203.0.113.42:18787/ws');
+    ws.handshake();
+    await p;
+    expect(ws.sent[0]).toMatchObject({ type: 'join', host: '203.0.113.42:18787' });
   });
 });
 

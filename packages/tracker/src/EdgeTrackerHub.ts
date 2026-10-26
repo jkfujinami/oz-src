@@ -14,6 +14,8 @@
  *    ピア一覧の共有と `RELAY_SDP` / `RELAY_ICE` の横断ルーティングが可能。
  */
 
+import { selectJoinPeers, type RingCandidate } from './RingSelect';
+
 export interface MinimalWebSocket {
   send(data: Uint8Array | ArrayBuffer): void;
   close(code?: number, reason?: string): void;
@@ -189,6 +191,17 @@ async function derivePeerIdBytes(pubkey: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(hash, 0, PEER_ID_BYTES);
 }
 
+const POSITION_DOMAIN = new TextEncoder().encode('OZ/v3/position');
+
+/** NodeIdentity.derivePosition と同じ式: SHA-256(domain || peerIdBytes) の先頭 8 バイト / 2^64 */
+async function deriveRingPosition(peerIdBytes: Uint8Array): Promise<number> {
+  const buf = new Uint8Array(POSITION_DOMAIN.length + peerIdBytes.length);
+  buf.set(POSITION_DOMAIN, 0);
+  buf.set(peerIdBytes, POSITION_DOMAIN.length);
+  const hash = await crypto.subtle.digest('SHA-256', buf);
+  return Number(new DataView(hash, 0, 8).getBigUint64(0, false)) / 18446744073709551616;
+}
+
 async function verifyEd25519Signature(
   pubkey: Uint8Array,
   signature: Uint8Array,
@@ -301,7 +314,12 @@ interface BroadcastMessage {
 
 export class EdgeTrackerHub {
   private readonly connections = new Map<MinimalWebSocket, ConnState>();
-  private readonly sessions = new Map<string, { ws: MinimalWebSocket; peerIdBytes: Uint8Array }>();
+  private readonly sessions = new Map<
+    string,
+    { ws: MinimalWebSocket; peerIdBytes: Uint8Array; position: number; joinedAt: number }
+  >();
+  /** peerIdHex -> リング座標 (導出値のキャッシュ。BroadcastChannel 経由のピア用) */
+  private readonly positionCache = new Map<string, number>();
   private readonly remotePeers = new Map<string, number>(); // peerIdHex -> seenAtMs (BroadcastChannel 経由)
   private readonly perAddress = new Map<string, number>();
   private readonly allowedHosts: Set<string> | null;
@@ -564,6 +582,16 @@ export class EdgeTrackerHub {
     }
   }
 
+  /** リング座標 (peerId からの導出値)。キャッシュは remotePeers と同程度の上限で打ち切る */
+  private async positionOf(peerIdHex: string, peerIdBytes: Uint8Array): Promise<number> {
+    const cached = this.positionCache.get(peerIdHex);
+    if (cached !== undefined) return cached;
+    const pos = await deriveRingPosition(peerIdBytes);
+    if (this.positionCache.size >= MAX_REMOTE_PEERS) this.positionCache.clear();
+    this.positionCache.set(peerIdHex, pos);
+    return pos;
+  }
+
   private async handleJoinFrame(ws: MinimalWebSocket, state: ConnState, b: Uint8Array): Promise<void> {
     if (!this.consumeRateLimit(state, 'join')) {
       this.sendError(ws, 'rate-limited');
@@ -630,6 +658,8 @@ export class EdgeTrackerHub {
       this.reject(ws, 'bad-signature');
       return;
     }
+    // await を挟むのはここまで (以降のセッション表の確認と登録の間に他の JOIN を割り込ませない)
+    const position = await this.positionOf(peerIdHex, peerIdBytes);
 
     const existing = this.sessions.get(peerIdHex);
     if (!existing && this.sessions.size >= this.maxSessions) {
@@ -647,7 +677,7 @@ export class EdgeTrackerHub {
       }
     }
 
-    this.sessions.set(peerIdHex, { ws, peerIdBytes });
+    this.sessions.set(peerIdHex, { ws, peerIdBytes, position, joinedAt: Date.now() });
     state.peerIdHex = peerIdHex;
     state.peerIdBytes = peerIdBytes;
     if (!state.joined) {
@@ -661,30 +691,25 @@ export class EdgeTrackerHub {
 
     this.bc?.postMessage({ kind: 'join', peerIdHex } satisfies BroadcastMessage);
 
-    // ランダムに最大 peersPerJoin 件のピアを選んで PEERS (0x02) を返却
-    const candidates: Uint8Array[] = [];
+    // リング近傍 + 新着 + ランダムで最大 peersPerJoin 件を選んで PEERS (0x02) を返却 (RingSelect)
+    const selfPosition = this.sessions.get(peerIdHex)?.position ?? null;
+    const candidates: RingCandidate<Uint8Array>[] = [];
     for (const [idHex, entry] of this.sessions) {
       if (idHex !== peerIdHex) {
-        candidates.push(entry.peerIdBytes);
+        candidates.push({ item: entry.peerIdBytes, position: entry.position, joinedAt: entry.joinedAt });
       }
     }
     const now = Date.now();
     for (const [remoteHex, seen] of this.remotePeers) {
       if (now - seen > this.remotePeerTtlMs) continue;
       if (remoteHex !== peerIdHex && !this.sessions.has(remoteHex)) {
-        candidates.push(fromHex(remoteHex));
+        const bytes = fromHex(remoteHex);
+        candidates.push({ item: bytes, position: await this.positionOf(remoteHex, bytes), joinedAt: seen });
       }
     }
 
-    // Fisher-Yates シャッフル
-    for (let i = candidates.length - 1; i > 0; i--) {
-      const rand = crypto.getRandomValues(new Uint32Array(1))[0] % (i + 1);
-      const tmp = candidates[i];
-      candidates[i] = candidates[rand];
-      candidates[rand] = tmp;
-    }
-
-    const selected = candidates.slice(0, this.peersPerJoin);
+    const randomInt = (n: number): number => crypto.getRandomValues(new Uint32Array(1))[0] % n;
+    const selected = selectJoinPeers(selfPosition, candidates, this.peersPerJoin, randomInt);
     const peersFrame = new Uint8Array(2 + selected.length * PEER_ID_BYTES);
     peersFrame[0] = T_PEERS;
     peersFrame[1] = selected.length;

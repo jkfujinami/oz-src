@@ -54,9 +54,14 @@ export class PEXHandler {
     const pm = this.peerManager;
     const filterOrigin = !!pm.originOf && !pm.sameOriginHopsAllowed;
     const requesterOrigin = filterOrigin ? pm.originOf!(senderPeerId) : '';
-    const candidates = Array.from(this.peerManager.peers.values())
-      .filter(p => p.peerId !== senderPeerId && p.isConnected && p.isVerified)
-      .filter(p => !filterOrigin || !sameOrigin(requesterOrigin, pm.originOf!(p.peerId)))
+    const verifiedNeighbors = Array.from(this.peerManager.peers.values())
+      .filter(p => p.peerId !== senderPeerId && p.isConnected && p.isVerified);
+    const diverseNeighbors = filterOrigin
+      ? verifiedNeighbors.filter(p => !sameOrigin(requesterOrigin, pm.originOf!(p.peerId)))
+      : verifiedNeighbors;
+    // 別出所の隣人が 1 人でもいればそちらのみを紹介し、全員が同一 LAN / 同一 IP の場合のみ空振りを防ぐためフォールバックする
+    const selectedNeighbors = diverseNeighbors.length > 0 ? diverseNeighbors : verifiedNeighbors;
+    const candidates = selectedNeighbors
       .map(p => {
         const peer = p as any;
         return peer.pubkey instanceof Uint8Array && typeof peer.powCounter === 'number'

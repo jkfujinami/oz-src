@@ -28,6 +28,13 @@ import { createLogger } from '../common/Logger';
 
 const log = createLogger('net.peer');
 
+/** Eviction から保護する方向付き近傍の数 (片側)。トラッカーの RingSelect と同じ値 */
+const RING_DIRECTED_NEIGHBORS = 2;
+/** トラッカーに繋いだまま次数がこれ未満で、接続試行中も無ければ JOIN し直す */
+const ISOLATION_REJOIN_BELOW_DEGREE = 2;
+/** 直前の JOIN からこれだけ経っていなければ JOIN し直さない (トラッカーへの連打防止) */
+const ISOLATION_REJOIN_MIN_ATTACHED_MS = 20_000;
+
 /** peerId は Bound Identity なので hex 32 文字に固定されている */
 const PEER_ID_RE = /^[0-9a-f]{32}$/;
 
@@ -240,6 +247,8 @@ export class PeerManager implements IPeerManager {
   /** 握手待ち (未検証) の接続の出所と開始時刻。検証済み・切断で消す */
   private pendingMeta = new Map<PeerId, { source: string; startedAt: number; reserved: boolean }>();
   private readonly keepTrackerAttached: boolean;
+  private readonly shouldKeepTrackerAttached: () => boolean;
+  private readonly reannounceBelowDegree: number;
   /** stop() 済みか。停止後は新規接続も再アナウンスもしない */
   private stopped = false;
   private readonly allowMissingDtlsFingerprint: boolean;
@@ -276,6 +285,10 @@ export class PeerManager implements IPeerManager {
       maxPendingPeers?: number;
       /** true ならトラッカーから切り離さない (Guard 役。利用者が自分を見つけられるように) */
       keepTrackerAttached?: boolean;
+      /** 動的にトラッカー接続を維持すべきか判定する (オープン網や目標次数未達の間など) */
+      shouldKeepTrackerAttached?: () => boolean;
+      /** 再アナウンスを行う次数閾値 (既定 4) */
+      reannounceBelowDegree?: number;
       /** WebRTC に渡す STUN の一覧を、接続のたびに返す (トラッカーが後から変わっても追従する) */
       iceServers?: () => RTCIceServer[];
       /**
@@ -289,6 +302,8 @@ export class PeerManager implements IPeerManager {
     this.allowSameOriginHops = options.allowSameOriginHops ?? (() => false);
     this.maxDegreeLimit = options.maxDegree ?? RING_MESH.MAX_DEGREE;
     this.keepTrackerAttached = options.keepTrackerAttached ?? false;
+    this.shouldKeepTrackerAttached = options.shouldKeepTrackerAttached ?? (() => false);
+    this.reannounceBelowDegree = options.reannounceBelowDegree ?? 4;
     this.maxPendingPeers = options.maxPendingPeers ?? (this.keepTrackerAttached ? MAX_PENDING_PEERS_GUARD : MAX_PENDING_PEERS);
     this.allowMissingDtlsFingerprint = options.allowMissingDtlsFingerprint ?? false;
     this.identity = identity;
@@ -484,6 +499,24 @@ export class PeerManager implements IPeerManager {
     const distance = (p: WebRTCPeer) => RingPosition.distance(this.myPosition, p.position);
     const byDistance = [...verified].sort((a, b) => distance(a) - distance(b));
     const local = new Set(byDistance.slice(0, RING_MESH.LOCAL_LINKS).map(p => p.peerId));
+    // ★ 方向付き近傍 (時計回り最近接 2 + 反時計回り最近接 2) も外さない。
+    //   「v が u の時計回り最近接 2 に入る ⇔ u が v の反時計回り最近接 2 に入る」が
+    //   (互いの近傍が接続済みなら) 成り立つので、両端が同じ規則で保護し合い、
+    //   リングが切れない。無向の最近接だけだと、片側に偏った密集で片方向の隣が落ちる。
+    //   半周より遠い相手は「その方向の隣」ではないので数えない (u→v の時計回り距離 d と
+    //   v→u の反時計回り距離は同じ d なので、半周で切っても対称性は保たれる)。
+    const cw = (p: WebRTCPeer) => {
+      const d = p.position - this.myPosition;
+      return d < 0 ? d + 1 : d;
+    };
+    const ccw = (p: WebRTCPeer) => {
+      const d = this.myPosition - p.position;
+      return d < 0 ? d + 1 : d;
+    };
+    const cwSide = verified.filter(p => cw(p) < 0.5).sort((a, b) => cw(a) - cw(b));
+    const ccwSide = verified.filter(p => cw(p) >= 0.5 || cw(p) === 0).sort((a, b) => ccw(a) - ccw(b));
+    for (const p of cwSide.slice(0, RING_DIRECTED_NEIGHBORS)) local.add(p.peerId);
+    for (const p of ccwSide.slice(0, RING_DIRECTED_NEIGHBORS)) local.add(p.peerId);
     // ★ 信頼 Guard は外さない。サンプルの Guard を押し出されると、利用者は信頼できない
     //   隣人へフォールバックしてしまう (inbound の新顔を大量に送り込むだけで起こせる)。
     for (const p of verified) if (this.isTrustedGuardPeer(p)) local.add(p.peerId);
@@ -679,11 +712,31 @@ export class PeerManager implements IPeerManager {
     if (this.reannounceTimer) clearInterval(this.reannounceTimer);
     this.reannounceTimer = setInterval(() => {
       if (this.stopped) return;
-      if (this.degree < 4 && !this.signaling.isConnected) {
-        log.info(`Degree dropped to ${this.degree} (< 4). Reconnecting to tracker for network repair.`);
+      const needsTracker =
+        this.degree < this.reannounceBelowDegree ||
+        this.keepTrackerAttached ||
+        this.shouldKeepTrackerAttached();
+      if (needsTracker && !this.signaling.isConnected) {
+        log.info(`Degree dropped to ${this.degree} (< ${this.reannounceBelowDegree}). Reconnecting to tracker for network repair.`);
         this.connectTracker().catch((err) => {
           if (err instanceof TrackerNotConfiguredError) return;
           log.warn(`Adaptive tracker reconnect failed: ${err}`);
+        });
+      } else if (
+        this.signaling.isConnected &&
+        !this.keepTrackerAttached &&
+        this.shouldKeepTrackerAttached() &&
+        this.degree < ISOLATION_REJOIN_BELOW_DEGREE &&
+        this.pendingCount === 0 &&
+        Date.now() - this.trackerAttachedAt >= ISOLATION_REJOIN_MIN_ATTACHED_MS
+      ) {
+        // ★ トラッカーへ繋ぎっぱなしのまま孤立した場合。PEERS は JOIN の応答でしか来ないので、
+        //   接続を張り直さないと新しい紹介 (今のリング近傍) を受け取れず、孤立が続く。
+        log.info(`Isolated (degree ${this.degree}) while attached. Re-joining tracker for fresh peers.`);
+        this.signaling.disconnect();
+        this.connectTracker().catch((err) => {
+          if (err instanceof TrackerNotConfiguredError) return;
+          log.warn(`Tracker re-join failed: ${err}`);
         });
       }
       // 待ち受け Guard が切れていれば張り直す (新しいタイマーは足さず、この周期に相乗りする)
@@ -818,7 +871,11 @@ export class PeerManager implements IPeerManager {
   private scheduleDetach(afterMs: number): void {
     this.detachTimer = setTimeout(() => {
       this.detachTimer = null;
-      if (this.stopped) return;
+      if (this.stopped || this.keepTrackerAttached) return;
+      if (this.shouldKeepTrackerAttached()) {
+        this.scheduleDetach(TRACKER_DETACH_MS);
+        return;
+      }
       const waited = Date.now() - this.trackerAttachedAt;
       if (this.wantedGuardsUnverified().length > 0 && waited < TRACKER_DETACH_GUARD_CAP_MS) {
         this.scheduleDetach(Math.min(TRACKER_DETACH_RECHECK_MS, TRACKER_DETACH_GUARD_CAP_MS - waited));

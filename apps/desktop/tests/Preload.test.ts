@@ -38,7 +38,7 @@ describe('Electron preload', () => {
     expect(Object.keys(exposed)).toEqual(['electronAPI']);
     const api = exposed.electronAPI;
     expect(Object.keys(api).sort()).toEqual(['clearCaches', 'guard', 'isElectron', 'onCommand', 'platform', 'wipeDeviceData']);
-    expect(Object.keys(api.guard).sort()).toEqual(['disable', 'enable', 'get', 'onStatus', 'setOpenAtLogin']);
+    expect(Object.keys(api.guard).sort()).toEqual(['disable', 'enable', 'get', 'onStatus', 'setOpenAtLogin', 'setTrackerUrl']);
     for (const v of [...Object.values(api), ...Object.values(api.guard)]) {
       expect(v).not.toHaveProperty('send');
       expect(v).not.toHaveProperty('invoke');
@@ -75,13 +75,17 @@ describe('Electron preload', () => {
     const g = exposed.electronAPI.guard;
     await g.get('x');
     await g.enable({ slots: 8, passphrase: 'steal' });
+    await g.enable({ slots: 4, trackerPort: 18787, passphrase: 'steal' });
     await g.disable('x');
     await g.setOpenAtLogin('yes');
+    await g.setTrackerUrl('oz-tracker:test');
     expect(invoked).toEqual([
       ['oz-guard:get'],
       ['oz-guard:enable', { slots: 8 }],
+      ['oz-guard:enable', { slots: 4, trackerPort: 18787 }],
       ['oz-guard:disable'],
       ['oz-guard:set-login', false],
+      ['oz-guard:set-tracker-url', 'oz-tracker:test'],
     ]);
     const cb = vi.fn();
     const off = g.onStatus(cb);

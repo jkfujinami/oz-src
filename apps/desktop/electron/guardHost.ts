@@ -26,9 +26,18 @@ interface GuardConfigFile {
   enabled: boolean;
   slots: number;
   openAtLogin: boolean;
+  trackerPort?: number | null;
+  trackerUrl?: string | null;
 }
 
-const DEFAULT_CONFIG: GuardConfigFile = { v: 1, enabled: false, slots: 4, openAtLogin: false };
+const DEFAULT_CONFIG: GuardConfigFile = {
+  v: 1,
+  enabled: false,
+  slots: 4,
+  openAtLogin: false,
+  trackerPort: null,
+  trackerUrl: null,
+};
 
 /** 止めるときに、Guard のウィンドウが書き残しを終えるのを待つ上限 */
 export const GUARD_STOP_TIMEOUT_MS = 8000;
@@ -59,6 +68,11 @@ export interface GuardHostDeps {
   setLoginItem(openAtLogin: boolean): void;
   /** 状態が変わったら画面へ知らせる */
   notify(status: DesktopGuardStatus): void;
+  /** ポート開放トラッカーを起動・停止するサービス (任意) */
+  trackerService?: {
+    start(port: number): Promise<{ trackerString: string; port: number }>;
+    stop(): Promise<void>;
+  };
 }
 
 export class GuardHost {
@@ -66,6 +80,7 @@ export class GuardHost {
   private window: GuardWindowLike | null = null;
   private starting = false;
   private report: GuardReport | null = null;
+  private trackerString: string | null = null;
   private error: string | null = null;
   private stopWaiter: (() => void) | null = null;
 
@@ -89,6 +104,8 @@ export class GuardHost {
         enabled: raw.enabled === true,
         slots: clampSlots(raw.slots),
         openAtLogin: raw.openAtLogin === true,
+        trackerPort: clampPort(raw.trackerPort),
+        trackerUrl: typeof raw.trackerUrl === 'string' && raw.trackerUrl.length > 0 ? raw.trackerUrl : null,
       };
     } catch {
       return { ...DEFAULT_CONFIG };
@@ -122,6 +139,8 @@ export class GuardHost {
       running: this.report !== null,
       openAtLogin: this.config.openAtLogin,
       slots: this.config.slots,
+      trackerPort: this.config.trackerPort ?? null,
+      trackerString: this.trackerString,
       report: this.report,
       error: this.error,
     };
@@ -148,18 +167,46 @@ export class GuardHost {
     if (this.config.enabled && this.availability().ok) this.start();
   }
 
-  enable(opts: { slots?: number } = {}): DesktopGuardStatus {
+  enable(opts: { slots?: number; trackerPort?: number | null } = {}): DesktopGuardStatus {
     const avail = this.availability();
     if (!avail.ok) {
       this.error = avail.reason;
       this.changed();
       return this.status();
     }
-    this.config = { ...this.config, enabled: true, slots: clampSlots(opts.slots ?? this.config.slots) };
+    const nextPort = opts.trackerPort !== undefined ? clampPort(opts.trackerPort) : (this.config.trackerPort ?? null);
+    this.config = {
+      ...this.config,
+      enabled: true,
+      slots: clampSlots(opts.slots ?? this.config.slots),
+      trackerPort: nextPort,
+    };
     this.writeConfig();
     this.error = null;
     this.start();
     return this.status();
+  }
+
+  /** 画面で変更されたトラッカー URL を Guard 側にも同期する */
+  setTrackerUrl(url: string | null): DesktopGuardStatus {
+    const cleaned = typeof url === 'string' && url.trim().length > 0 ? url.trim() : null;
+    this.config = { ...this.config, trackerUrl: cleaned };
+    this.writeConfig();
+    if (this.window && !this.window.isDestroyed()) {
+      try {
+        this.window.webContents.send('oz-guard:tracker-url', this.effectiveTrackerUrl());
+      } catch {
+        // ignore
+      }
+    }
+    return this.status();
+  }
+
+  private effectiveTrackerUrl(): string | null {
+    if (this.config.trackerPort) {
+      return `ws://127.0.0.1:${this.config.trackerPort}/ws`;
+    }
+    return this.config.trackerUrl ?? null;
   }
 
   async disable(): Promise<DesktopGuardStatus> {
@@ -181,6 +228,21 @@ export class GuardHost {
     if (this.window && !this.window.isDestroyed()) return;
     this.starting = true;
     this.report = null;
+    this.trackerString = null;
+    if (this.config.trackerPort && this.deps.trackerService) {
+      const port = this.config.trackerPort;
+      void this.deps.trackerService
+        .start(port)
+        .then((res) => {
+          if (!this.config.enabled) return;
+          this.trackerString = res.trackerString;
+          this.changed();
+        })
+        .catch((err) => {
+          this.error = `トラッカーポート ${port} を開けませんでした: ${err instanceof Error ? err.message : String(err)}`;
+          this.changed();
+        });
+    }
     this.window = this.deps.openWindow();
     this.changed();
   }
@@ -189,10 +251,15 @@ export class GuardHost {
     return !!this.window && !this.window.isDestroyed() && this.window.webContents.id === senderId;
   }
 
-  /** Guard のウィンドウが起動に要るもの (パスフレーズ・枠) を取りに来た。Guard のウィンドウ以外には渡さない */
+  /** Guard のウィンドウが起動に要るもの (パスフレーズ・枠・トラッカー URL) を取りに来た。Guard のウィンドウ以外には渡さない */
   startConfigFor(senderId: number): GuardStartConfig {
     if (!this.isGuardSender(senderId)) throw new Error('untrusted sender');
-    return { passphrase: this.passphrase(), slots: this.config.slots };
+    const trackerUrl = this.effectiveTrackerUrl();
+    return {
+      passphrase: this.passphrase(),
+      slots: this.config.slots,
+      ...(trackerUrl ? { trackerUrl } : {}),
+    };
   }
 
   /** Guard のウィンドウから状態が届いた */
@@ -252,6 +319,10 @@ export class GuardHost {
     });
     this.stopWaiter = null;
     this.destroyWindow();
+    if (this.deps.trackerService) {
+      await this.deps.trackerService.stop().catch(() => {});
+    }
+    this.trackerString = null;
     this.report = null;
     this.starting = false;
     this.changed();
@@ -260,6 +331,8 @@ export class GuardHost {
   /** 緊急消去: 待たずにウィンドウを壊し、設定と封印したパスフレーズを消す */
   destroyNow(): void {
     this.destroyWindow();
+    void this.deps.trackerService?.stop().catch(() => {});
+    this.trackerString = null;
     this.report = null;
     this.starting = false;
     try {
@@ -281,4 +354,9 @@ export class GuardHost {
 function clampSlots(v: unknown): number {
   const n = typeof v === 'number' && Number.isInteger(v) ? v : DEFAULT_CONFIG.slots;
   return Math.min(GUARD_SLOTS_MAX, Math.max(GUARD_SLOTS_MIN, n));
+}
+
+function clampPort(v: unknown): number | null {
+  if (typeof v !== 'number' || !Number.isInteger(v) || v < 1 || v > 65535) return null;
+  return v;
 }

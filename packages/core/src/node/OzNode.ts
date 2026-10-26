@@ -37,7 +37,7 @@ import { ThreadOrchestrator } from '../logic/ThreadOrchestrator';
 import type { IPoWEngine, IKeyManager, ISignalingClient } from '../types';
 import { GuardManager, type GuardManagerOptions, type GuardStatus } from '../trust/GuardManager';
 import type { MaintainerKeySet, GuardListResult } from '../trust/TrustedGuards';
-import { GUARD_MAX_DEGREE } from '../constants';
+import { GUARD_MAX_DEGREE, RING_MESH } from '../constants';
 import { Encoding } from '../common/Encoding';
 import { createLogger } from '../common/Logger';
 import {
@@ -360,11 +360,17 @@ export class OzNode {
     const iceState = { explicit: explicitIce.ok ? explicitIce.servers : [] };
     const iceServers = () => resolveIceServers(iceState.explicit, signaling.url ?? null);
     const isGuardRole = config.role === 'guard';
-    const peerManager = new PeerManager(nodeIdentity, dispatcher, signaling, {
+    const peerManager: PeerManager = new PeerManager(nodeIdentity, dispatcher, signaling, {
       rateLimiter,
       iceServers,
       // ★ 経路の各段が同じ端末でもよいのは、トラッカーが自分の端末 (開発用の網) のときだけ
       allowSameOriginHops: () => isLoopbackTrackerUrl(signaling.url ?? null),
+      reannounceBelowDegree: RING_MESH.OUTBOUND_TARGET,
+      // 試行中の接続の上限。一般ノードは次数の上限 (MAX_DEGREE) まで。
+      // 既定の 8 では、JOIN 直後の紹介 (8) と PEX・inbound が重なると取りこぼす
+      ...(isGuardRole ? {} : { maxPendingPeers: RING_MESH.MAX_DEGREE }),
+      // オープン網 (信頼 Guard リスト未設定) または目標次数未満の間はトラッカー接続を維持し、新規参加ノードを受け入れる
+      shouldKeepTrackerAttached: (): boolean => !guards.hasUsableList || peerManager.degree < RING_MESH.OUTBOUND_TARGET,
       ...(isGuardRole ? { maxDegree: GUARD_MAX_DEGREE, keepTrackerAttached: true } : {}),
     });
     const identity = new Identity();

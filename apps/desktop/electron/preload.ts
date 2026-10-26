@@ -29,9 +29,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
    */
   guard: {
     get: (): Promise<unknown> => ipcRenderer.invoke('oz-guard:get'),
-    enable: (opts: { slots: number }): Promise<unknown> => ipcRenderer.invoke('oz-guard:enable', { slots: opts.slots }),
+    enable: (opts: { slots: number; trackerPort?: number | null }): Promise<unknown> =>
+      ipcRenderer.invoke('oz-guard:enable', {
+        slots: opts.slots,
+        ...(opts.trackerPort !== undefined ? { trackerPort: opts.trackerPort } : {}),
+      }),
     disable: (): Promise<unknown> => ipcRenderer.invoke('oz-guard:disable'),
     setOpenAtLogin: (on: boolean): Promise<unknown> => ipcRenderer.invoke('oz-guard:set-login', on === true),
+    setTrackerUrl: (url: string | null): Promise<unknown> => ipcRenderer.invoke('oz-guard:set-tracker-url', url),
     onStatus: (cb: (status: unknown) => void) => {
       const listener = (_event: IpcRendererEvent, status: unknown) => cb(status);
       ipcRenderer.on('oz-guard:status', listener);

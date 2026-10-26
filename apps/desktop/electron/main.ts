@@ -5,6 +5,7 @@ import { randomBytes } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { clearVolatileData, removeDirContents, wipeDeviceData } from './wipe';
 import { GuardHost } from './guardHost';
+import { createLocalTrackerService } from './localTracker';
 
 /**
  * ★ 端末に残る痕跡を減らす設定 (app が ready になる前に決める)
@@ -303,8 +304,11 @@ if (!gotTheLock) {
   });
   ipcMain.handle('oz-guard:enable', (event, opts: unknown) => {
     fromMainWindow(event);
-    const slots = typeof opts === 'object' && opts !== null ? (opts as { slots?: unknown }).slots : undefined;
-    return guardHost?.enable({ slots: typeof slots === 'number' ? slots : undefined }) ?? null;
+    const o = typeof opts === 'object' && opts !== null ? (opts as { slots?: unknown; trackerPort?: unknown }) : {};
+    return guardHost?.enable({
+      slots: typeof o.slots === 'number' ? o.slots : undefined,
+      trackerPort: typeof o.trackerPort === 'number' ? o.trackerPort : o.trackerPort === null ? null : undefined,
+    }) ?? null;
   });
   ipcMain.handle('oz-guard:disable', async (event) => {
     fromMainWindow(event);
@@ -313,6 +317,10 @@ if (!gotTheLock) {
   ipcMain.handle('oz-guard:set-login', (event, on: unknown) => {
     fromMainWindow(event);
     return guardHost?.setOpenAtLogin(on === true) ?? null;
+  });
+  ipcMain.handle('oz-guard:set-tracker-url', (event, url: unknown) => {
+    fromMainWindow(event);
+    return guardHost?.setTrackerUrl(typeof url === 'string' ? url : null) ?? null;
   });
   ipcMain.handle('oz-guard:start-config', (event) => {
     if (!guardHost) throw new Error('guard not ready');
@@ -375,6 +383,7 @@ if (!gotTheLock) {
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('oz-guard:status', status);
         tray?.setToolTip(status.running ? `${APP_NAME} (Guard 稼働中)` : APP_NAME);
       },
+      trackerService: createLocalTrackerService(),
     });
     // ★ 画面のロックとは関係なく動かす (画面のノードが止まっていても、Guard は利用者を受け入れ続ける)
     guardHost.startIfEnabled();

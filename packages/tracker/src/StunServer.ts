@@ -126,16 +126,25 @@ export function buildBindingResponse(txId: Uint8Array, address: string, port: nu
 /** 送信元 IP ごとのトークンバケット + 全体の上限。時計は差し替えられる (テスト用) */
 export class StunRateLimiter {
   private buckets = new Map<string, { tokens: number; at: number }>();
-  private globalTokens: number = STUN_LIMITS.globalPerSec;
+  private globalTokens: number;
   private globalAt: number;
+  private readonly perIp: number;
+  private readonly global: number;
 
-  constructor(private readonly now: () => number = Date.now) {
+  /** limits は省略時 STUN_LIMITS。同一ホストで多数ノードを動かす検証用に上書きできる */
+  constructor(
+    private readonly now: () => number = Date.now,
+    limits: { perIpPerSec?: number; globalPerSec?: number } = {},
+  ) {
+    this.perIp = limits.perIpPerSec ?? STUN_LIMITS.perIpPerSec;
+    this.global = limits.globalPerSec ?? STUN_LIMITS.globalPerSec;
+    this.globalTokens = this.global;
     this.globalAt = now();
   }
 
   allow(ip: string): boolean {
     const t = this.now();
-    this.globalTokens = Math.min(STUN_LIMITS.globalPerSec, this.globalTokens + ((t - this.globalAt) / 1000) * STUN_LIMITS.globalPerSec);
+    this.globalTokens = Math.min(this.global, this.globalTokens + ((t - this.globalAt) / 1000) * this.global);
     this.globalAt = t;
     if (this.globalTokens < 1) return false;
 
@@ -145,10 +154,10 @@ export class StunRateLimiter {
         this.sweep(t);
         if (this.buckets.size >= STUN_LIMITS.maxTrackedIps) return false;
       }
-      b = { tokens: STUN_LIMITS.perIpPerSec, at: t };
+      b = { tokens: this.perIp, at: t };
       this.buckets.set(ip, b);
     } else {
-      b.tokens = Math.min(STUN_LIMITS.perIpPerSec, b.tokens + ((t - b.at) / 1000) * STUN_LIMITS.perIpPerSec);
+      b.tokens = Math.min(this.perIp, b.tokens + ((t - b.at) / 1000) * this.perIp);
       b.at = t;
     }
     if (b.tokens < 1) return false;
@@ -160,7 +169,7 @@ export class StunRateLimiter {
   /** 満タンまで回復した (= 直近使っていない) 送信元の状態を捨てる */
   sweep(t: number = this.now()): void {
     for (const [ip, b] of this.buckets) {
-      if (b.tokens + ((t - b.at) / 1000) * STUN_LIMITS.perIpPerSec >= STUN_LIMITS.perIpPerSec) this.buckets.delete(ip);
+      if (b.tokens + ((t - b.at) / 1000) * this.perIp >= this.perIp) this.buckets.delete(ip);
     }
   }
 
@@ -185,8 +194,8 @@ export class StunServer {
   private sweeper: ReturnType<typeof setInterval> | null = null;
   private counts: StunCounts = { responded: 0, ignored: 0, limited: 0 };
 
-  constructor(now?: () => number) {
-    this.limiter = new StunRateLimiter(now);
+  constructor(now?: () => number, limits?: { perIpPerSec?: number; globalPerSec?: number }) {
+    this.limiter = new StunRateLimiter(now, limits);
   }
 
   /** port 0 なら OS が空きポートを選ぶ (テスト用)。実際のポートを返す */

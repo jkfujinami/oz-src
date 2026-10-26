@@ -18,6 +18,7 @@ interface GuardBridge {
   reportStatus(report: GuardReport): void;
   reportError(message: string): void;
   onStop(cb: () => void): void;
+  onTrackerUrl?(cb: (url: string | null) => void): void;
   stopped(): void;
 }
 
@@ -30,16 +31,23 @@ async function run(b: GuardBridge): Promise<void> {
     throw new Error('起動の設定を受け取れませんでした');
   }
   const { passphrase, slots } = cfg;
-  if (!DEFAULT_TRACKER_URL) throw new Error('トラッカーが設定されていません');
+  const initialTrackerUrl = cfg.trackerUrl || DEFAULT_TRACKER_URL;
+  if (!initialTrackerUrl) throw new Error('トラッカーが設定されていません');
   const node = await OzNode.create({
     db: new IndexedDBStore(DESKTOP_GUARD_DB_NAME),
     role: 'guard',
     identityMode: 'persistent',
     passphrase,
-    trackerUrl: DEFAULT_TRACKER_URL,
+    trackerUrl: initialTrackerUrl,
     ...(ICE_SERVERS && ICE_SERVERS.length > 0 ? { iceServers: ICE_SERVERS } : {}),
     ...(GUARD_TRUST ? { trust: GUARD_TRUST } : {}),
     storage: { defaultSlots: slots },
+  });
+  b.onTrackerUrl?.((nextUrl) => {
+    const target = nextUrl || DEFAULT_TRACKER_URL;
+    if (target) {
+      void node.setTrackerUrl(target).catch(() => {});
+    }
   });
   const self = node.peerId;
   const guardString = createGuardString(node.nodeIdentity);

@@ -20,15 +20,18 @@ export interface DesktopGuardStatus {
   running: boolean;
   openAtLogin: boolean;
   slots: number;
+  trackerPort?: number | null;
+  trackerString?: string | null;
   report: DesktopGuardReport | null;
   error: string | null;
 }
 
 export interface DesktopGuardApi {
   get(): Promise<DesktopGuardStatus | null>;
-  enable(opts: { slots: number }): Promise<DesktopGuardStatus | null>;
+  enable(opts: { slots: number; trackerPort?: number | null }): Promise<DesktopGuardStatus | null>;
   disable(): Promise<DesktopGuardStatus | null>;
   setOpenAtLogin(on: boolean): Promise<DesktopGuardStatus | null>;
+  setTrackerUrl?(url: string | null): Promise<DesktopGuardStatus | null>;
   onStatus(cb: (status: DesktopGuardStatus) => void): () => void;
 }
 

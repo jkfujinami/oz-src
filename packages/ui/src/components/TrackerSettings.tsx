@@ -47,7 +47,7 @@ export function TrackerSettings({ onClose }: { onClose?: () => void }) {
       <div className="input-group">
         <input
           aria-label="トラッカーの URL"
-          placeholder="wss://..."
+          placeholder="wss://... または oz-tracker:..."
           value={input}
           spellCheck={false}
           autoComplete="off"
@@ -58,9 +58,17 @@ export function TrackerSettings({ onClose }: { onClose?: () => void }) {
             type="button"
             className="btn"
             style={{ fontSize: '11px', padding: '3px 8px', borderColor: 'var(--line-strong)', color: 'var(--text-2)' }}
+            onClick={() => setInput(STANDARD_TRACKERS.cloudflare)}
+          >
+            Cloudflare Workers (標準)
+          </button>
+          <button
+            type="button"
+            className="btn"
+            style={{ fontSize: '11px', padding: '3px 8px', borderColor: 'var(--line-strong)', color: 'var(--text-2)' }}
             onClick={() => setInput(STANDARD_TRACKERS.deno)}
           >
-            Deno Deploy (標準)
+            Deno Deploy
           </button>
         </div>
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '8px' }}>

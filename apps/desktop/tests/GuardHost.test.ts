@@ -182,4 +182,27 @@ describe('GuardHost (この端末の Guard の世話)', () => {
     expect(loginItems.at(-1)).toBe(false);
     expect(host().status().enabled).toBe(false);
   });
+
+  it('ポート開放トラッカー (trackerPort) を指定すると trackerService を起動して oz-tracker:... を返し、トラッカー URL 同期も行う', async () => {
+    const startMock = vi.fn().mockResolvedValue({ trackerString: 'oz-tracker:TEST_TOKEN', port: 18787 });
+    const stopMock = vi.fn().mockResolvedValue(undefined);
+    const h = host({ trackerService: { start: startMock, stop: stopMock } });
+
+    h.setTrackerUrl('wss://custom-tracker.example/ws');
+    h.enable({ slots: 4, trackerPort: 18787 });
+    expect(startMock).toHaveBeenCalledWith(18787);
+    await vi.waitFor(() => expect(h.status().trackerString).toBe('oz-tracker:TEST_TOKEN'));
+    expect(h.status().trackerPort).toBe(18787);
+
+    // ポート開放トラッカー稼働時は Guard 自身はそのローカルポートへ接続する
+    const cfg = h.startConfigFor(windows[0].webContents.id);
+    expect(cfg.trackerUrl).toBe('ws://127.0.0.1:18787/ws');
+
+    // 無効化で trackerService も停止する
+    const stopping = h.disable();
+    h.onStopped(windows[0].webContents.id);
+    await stopping;
+    expect(stopMock).toHaveBeenCalled();
+    expect(h.status().trackerString).toBeNull();
+  });
 });

@@ -84,8 +84,10 @@ describe('PeerManager: 信頼 Guard の保護・接続維持・トラッカー�
   describe('eviction', () => {
     function fill(n: number, guardId: string) {
       // 外される順で最後尾になる条件: inbound・最も新しく検証・リング上で最も遠い
+      // (両隣に詰める。片側だけに詰めると、反対側に 1 人だけいる相手が「その方向の隣」として保護される)
       for (let i = 1; i <= n; i++) {
-        putPeer(fakePeer(hex(i), { position: (identity.position + 0.001 * i) % 1, verifiedAt: 1_000 + i }));
+        const offset = (i % 2 === 0 ? 1 : -1) * 0.001 * i;
+        putPeer(fakePeer(hex(i), { position: (identity.position + offset + 1) % 1, verifiedAt: 1_000 + i }));
       }
       putPeer(fakePeer(guardId, { position: (identity.position + 0.5) % 1, verifiedAt: 999_999 }));
     }

@@ -14,8 +14,10 @@ export function DesktopGuardSettings() {
   const api = desktopGuardApi();
   const [status, setStatus] = useState<DesktopGuardStatus | null>(null);
   const [slots, setSlots] = useState<number>(4);
+  const [trackerPortInput, setTrackerPortInput] = useState<string>('');
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copiedTracker, setCopiedTracker] = useState(false);
 
   useEffect(() => {
     if (!api) return;
@@ -24,6 +26,7 @@ export function DesktopGuardSettings() {
       if (!alive || !s) return;
       setStatus(s);
       setSlots(s.slots);
+      if (s.trackerPort) setTrackerPortInput(String(s.trackerPort));
     });
     const off = api.onStatus((s) => { if (alive) setStatus(s); });
     return () => { alive = false; off(); };
@@ -51,6 +54,24 @@ export function DesktopGuardSettings() {
     } catch {
       // クリップボードが使えない環境では何もしない
     }
+  };
+
+  const copyTrackerString = async () => {
+    if (!status.trackerString) return;
+    try {
+      await copySecret(status.trackerString);
+      setCopiedTracker(true);
+      setTimeout(() => setCopiedTracker(false), 2000);
+    } catch {
+      // クリップボードが使えない環境では何もしない
+    }
+  };
+
+  const handleEnable = () => {
+    const trimmed = trackerPortInput.trim();
+    const parsedPort = trimmed.length > 0 ? Number(trimmed) : null;
+    const validPort = parsedPort !== null && Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65535 ? parsedPort : undefined;
+    void run(() => api.enable(validPort !== undefined ? { slots, trackerPort: validPort } : { slots }));
   };
 
   const r = status.report;
@@ -84,13 +105,42 @@ export function DesktopGuardSettings() {
               <select id="guard-slots" value={slots} onChange={(e) => setSlots(Number(e.target.value))} style={{ width: 'auto' }}>
                 {SLOT_CHOICES.map((n) => <option key={n} value={n}>{n} 枠 ({n * 256} MiB)</option>)}
               </select>
-              <button className="btn btn-primary" disabled={busy} onClick={() => void run(() => api.enable({ slots }))}>
+              <label className="field-label" htmlFor="guard-tracker-port">トラッカー開放ポート (任意)</label>
+              <input
+                id="guard-tracker-port"
+                type="number"
+                min={1}
+                max={65535}
+                placeholder="例: 8787"
+                value={trackerPortInput}
+                onChange={(e) => setTrackerPortInput(e.target.value)}
+                style={{ width: 110 }}
+              />
+              <button className="btn btn-primary" disabled={busy} onClick={handleEnable}>
                 Guard として動かす
               </button>
             </div>
           ) : (
             <div className="row row-wrap" style={{ gap: 8 }}>
               <button className="btn" disabled={busy} onClick={() => void run(() => api.disable())}>Guard を止める</button>
+            </div>
+          )}
+
+          {status.trackerString && (
+            <div className="subpanel stack stack-sm">
+              <div className="subpanel-title">ポート開放トラッカー (ポート {status.trackerPort})</div>
+              <div className="small">
+                この文字列をトラッカー設定に入力すると、IP アドレスとポート番号を直接晒さずにこの端末のトラッカーへ接続できます。
+              </div>
+              <div className="field">
+                <div className="row row-between row-wrap" style={{ gap: 8 }}>
+                  <span className="field-label">トラッカー文字列</span>
+                  <button className="btn btn-sm btn-ghost" onClick={() => void copyTrackerString()}>
+                    {copiedTracker ? 'コピーしました' : 'コピー'}
+                  </button>
+                </div>
+                <code className="code-block">{status.trackerString}</code>
+              </div>
             </div>
           )}
 

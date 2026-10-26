@@ -58,11 +58,14 @@ export function parseIceServers(input: string | readonly string[] | null | undef
   return { ok: true, servers };
 }
 
-/** トラッカー URL (wss://host:443/ws) から stun:host:3478 を導く。URL が無い・不正なら null */
+import { resolveTrackerWebSocketUrl } from './TrackerUrl';
+
+/** トラッカー URL (wss://host:443/ws または oz-tracker:...) から stun:host:3478 を導く。URL が無い・不正なら null */
 export function deriveStunFromTracker(trackerUrl: string | null | undefined, port: number = DEFAULT_STUN_PORT): string | null {
   if (!trackerUrl) return null;
   try {
-    const host = new URL(trackerUrl).hostname; // IPv6 は "[::1]" の形で返る
+    const resolved = resolveTrackerWebSocketUrl(trackerUrl);
+    const host = new URL(resolved).hostname; // IPv6 は "[::1]" の形で返る
     return host ? `stun:${host}:${port}` : null;
   } catch {
     return null;

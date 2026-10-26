@@ -219,6 +219,7 @@ export function P2PProvider({
         throw err;
       }
       setTrackerUrlState(oz.trackerUrl);
+      void Promise.resolve(electronApi()?.guard?.setTrackerUrl?.(oz.trackerUrl)).catch(() => {});
       setIceView({ chosen: oz.iceServers, effective: oz.effectiveIceServers, fallback: oz.defaultStunServer });
       nodeRef.current = oz;
       setNode(oz);
@@ -297,6 +298,7 @@ export function P2PProvider({
       url = parsed.url;
     }
     await saveTrackerUrl(current.db, url);
+    void Promise.resolve(electronApi()?.guard?.setTrackerUrl?.(url)).catch(() => {});
     try {
       await current.setTrackerUrl(url);
     } catch {

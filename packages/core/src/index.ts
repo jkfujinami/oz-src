@@ -34,7 +34,15 @@ export { PeerManager } from './network/PeerManager';
 export { WebRTCPeer } from './network/WebRTCPeer';
 export { SignalingClient, TrackerJoinError } from './network/SignalingClient';
 export { TRACKER_PROTOCOL_VERSION, TRACKER_MAX_PEERS, type TrackerErrorCode, TRACKER_FRAME_LIMITS, TRACKER_MAX_FRAME_BYTES, type TrackerServerMessage, type TrackerJoin, type TrackerRelayOut, encodeTrackerServerMessage, encodeTrackerClientMessage, parseTrackerClientMessage, parseTrackerServerMessage, normalizeHostHeader } from './network/TrackerProtocol';
-export { parseTrackerUrl, describeTrackerUrlError } from './network/TrackerUrl';
+export {
+  parseTrackerUrl,
+  describeTrackerUrlError,
+  TRACKER_STRING_PREFIX,
+  createTrackerString,
+  parseTrackerString,
+  resolveTrackerWebSocketUrl,
+  type TrackerEndpoint,
+} from './network/TrackerUrl';
 export { parseIceServers, deriveStunFromTracker, ICE_SERVERS_MAX, type IceServersResult } from './network/IceServers';
 export { MessageDispatcher } from './network/MessageDispatcher';
 export { GossipRouter } from './network/gossip/GossipRouter';

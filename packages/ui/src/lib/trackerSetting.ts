@@ -23,11 +23,12 @@ export const TRACKER_SETTING = 'trackerUrl';
  * 利用者が自分で設定したトラッカーがあれば、そちらが優先される。
  */
 export const STANDARD_TRACKERS = {
+  cloudflare: 'wss://ozzy-r2-gatekeeper.jkfujinamis.workers.dev/ws',
   deno: 'wss://ozzy-tracker.jkfujinami.deno.net/ws',
 } as const;
 
 /** 利用者がトラッカーを設定していないときの既定 */
-export const DEFAULT_TRACKER_URL = STANDARD_TRACKERS.deno;
+export const DEFAULT_TRACKER_URL = STANDARD_TRACKERS.cloudflare;
 
 function validOrNull(url: unknown): string | null {
   if (typeof url !== 'string') return null;

@@ -22,6 +22,8 @@ export interface GuardStartConfig {
   passphrase: string;
   /** 預かる枠の数 (1 枠 = 256MiB) */
   slots: number;
+  /** 画面で設定されているトラッカー URL または oz-tracker:... (未指定なら既定値) */
+  trackerUrl?: string | null;
 }
 
 /** 画面に見せる、この端末の Guard の状態 */
@@ -34,6 +36,10 @@ export interface DesktopGuardStatus {
   running: boolean;
   openAtLogin: boolean;
   slots: number;
+  /** ポート開放トラッカーとして待ち受けているポート番号 (無効時は null) */
+  trackerPort?: number | null;
+  /** 他の参加者に渡す難読化トラッカー文字列 (oz-tracker:...) */
+  trackerString?: string | null;
   report: GuardReport | null;
   error: string | null;
 }

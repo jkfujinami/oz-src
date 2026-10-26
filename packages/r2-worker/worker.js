@@ -253,6 +253,63 @@ async function authDigestOf(request) {
 const IA_SLAB_MAX_BYTES = 64 * 1024 * 1024;
 const KV_VALUE_MAX_BYTES = 24 * 1024 * 1024;
 
+const POSITION_DOMAIN = new TextEncoder().encode('OZ/v3/position');
+
+async function deriveRingPosition(peerIdBytes) {
+  const buf = new Uint8Array(POSITION_DOMAIN.length + peerIdBytes.length);
+  buf.set(POSITION_DOMAIN, 0);
+  buf.set(peerIdBytes, POSITION_DOMAIN.length);
+  const hash = await crypto.subtle.digest('SHA-256', buf);
+  return Number(new DataView(hash, 0, 8).getBigUint64(0, false)) / 18446744073709551616;
+}
+
+function cwDist(from, to) {
+  const d = to - from;
+  return d < 0 ? d + 1 : d;
+}
+
+function selectJoinPeers(selfPosition, candidates, k, randomInt) {
+  const pool = candidates.slice();
+  if (selfPosition === null || k < 6 || pool.length <= k) {
+    for (let i = pool.length - 1; i > 0; i--) {
+      const j = randomInt(i + 1);
+      const tmp = pool[i];
+      pool[i] = pool[j];
+      pool[j] = tmp;
+    }
+    return pool.slice(0, k).map((c) => c.item);
+  }
+
+  const picked = [];
+  const used = new Set();
+  const take = (list, n) => {
+    let got = 0;
+    for (const c of list) {
+      if (got >= n || picked.length >= k) return;
+      if (used.has(c)) continue;
+      used.add(c);
+      picked.push(c);
+      got++;
+    }
+  };
+
+  const self = selfPosition;
+  take(pool.slice().sort((a, b) => cwDist(self, a.position) - cwDist(self, b.position)), 2);
+  take(pool.slice().sort((a, b) => cwDist(a.position, self) - cwDist(b.position, self)), 2);
+  take(pool.slice().sort((a, b) => b.joinedAt - a.joinedAt), 2);
+
+  const rest = pool.filter((c) => !used.has(c));
+  for (let i = rest.length - 1; i > 0; i--) {
+    const j = randomInt(i + 1);
+    const tmp = rest[i];
+    rest[i] = rest[j];
+    rest[j] = tmp;
+  }
+  take(rest, k - picked.length);
+
+  return picked.map((c) => c.item);
+}
+
 export class OzzySlabVaultDO {
   constructor(state, env) {
     this.state = state;
@@ -456,7 +513,8 @@ export class OzzySlabVaultDO {
             try { existing.ws.close(); } catch {}
           }
 
-          this.trackerSessions.set(peerIdHex, { ws: serverWs, peerIdBytes });
+          const position = await deriveRingPosition(peerIdBytes);
+          this.trackerSessions.set(peerIdHex, { ws: serverWs, peerIdBytes, position, joinedAt: Date.now() });
           connState.peerIdHex = peerIdHex;
           connState.peerIdBytes = peerIdBytes;
           if (connState.timer) {
@@ -464,18 +522,13 @@ export class OzzySlabVaultDO {
             connState.timer = null;
           }
 
-          // PEERS (0x02) 返却 (ランダム最大 8 ピア)
+          // リング近傍 (時計回り2 + 反時計回り2) + 新着2 + ランダム で最大8ピアを返却 (RingSelect)
           const candidates = [];
           for (const [id, entry] of this.trackerSessions) {
-            if (id !== peerIdHex) candidates.push(entry.peerIdBytes);
+            if (id !== peerIdHex) candidates.push({ item: entry.peerIdBytes, position: entry.position, joinedAt: entry.joinedAt });
           }
-          for (let i = candidates.length - 1; i > 0; i--) {
-            const j = crypto.getRandomValues(new Uint32Array(1))[0] % (i + 1);
-            const temp = candidates[i];
-            candidates[i] = candidates[j];
-            candidates[j] = temp;
-          }
-          const selected = candidates.slice(0, 8);
+          const randomInt = (n) => crypto.getRandomValues(new Uint32Array(1))[0] % n;
+          const selected = selectJoinPeers(position, candidates, 8, randomInt);
           const peersFrame = new Uint8Array(2 + selected.length * 16);
           peersFrame[0] = 0x02;
           peersFrame[1] = selected.length;

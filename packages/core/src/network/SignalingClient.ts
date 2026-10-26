@@ -1,6 +1,6 @@
 import type { PeerId, ISignalingClient, WireNodeClaim, TrackerJoinSigner } from '../types';
 import { createLogger } from '../common/Logger';
-import { parseTrackerUrl } from './TrackerUrl';
+import { parseTrackerUrl, resolveTrackerWebSocketUrl } from './TrackerUrl';
 import {
   TRACKER_PROTOCOL_VERSION,
   encodeTrackerClientMessage,
@@ -103,7 +103,7 @@ export class SignalingClient implements ISignalingClient {
     // 閉じかけの古い接続は捨てる (二重接続で同じ peerId を 2 回登録しない)
     this.closeSocket();
     const generation = ++this.generation;
-    const url = this._url;
+    const url = resolveTrackerWebSocketUrl(this._url);
     const host = trackerHostOf(url);
 
     const attempt = new Promise<void>((resolve, reject) => {

@@ -39,7 +39,7 @@ const CSP = [
   "media-src 'self' blob:",
   "font-src 'self' data:",
   "worker-src 'self' blob:",
-  "connect-src 'self' https: wss:",
+  "connect-src 'self' https: wss: ws:",
   "object-src 'none'",
   "base-uri 'none'",
   "form-action 'none'",

@@ -13,5 +13,11 @@ contextBridge.exposeInMainWorld('ozGuard', {
   onStop: (cb: () => void): void => {
     ipcRenderer.on('oz-guard:stop', () => cb());
   },
+  /** トラッカー URL の変更指示を受ける */
+  onTrackerUrl: (cb: (url: string | null) => void): void => {
+    ipcRenderer.on('oz-guard:tracker-url', (_event, url: unknown) => {
+      cb(typeof url === 'string' ? url : null);
+    });
+  },
   stopped: (): void => ipcRenderer.send('oz-guard:stopped'),
 });

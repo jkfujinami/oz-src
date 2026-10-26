@@ -1,9 +1,22 @@
 import { WebSocket } from 'ws';
+import { createHash } from 'node:crypto';
+import { selectJoinPeers, type RingCandidate } from './RingSelect';
+
+const POSITION_DOMAIN = Buffer.from('OZ/v3/position', 'utf8');
+
+/** NodeIdentity.derivePosition と同じ式: SHA-256(domain || peerIdBytes) の先頭 8 バイト / 2^64 */
+export function ringPosition(peerIdHex: string): number {
+  const h = createHash('sha256').update(POSITION_DOMAIN).update(Buffer.from(peerIdHex, 'hex')).digest();
+  return Number(h.readBigUInt64BE(0)) / 18446744073709551616;
+}
 
 export interface PeerSession {
   peerId: string;
   ws: WebSocket;
   lastActive: number;
+  /** peerId から導出したリング座標 (保持するのは導出値だけ) */
+  position: number;
+  joinedAt: number;
 }
 
 export type RegisterResult = { ok: true; replaced: WebSocket | null } | { ok: false; reason: 'capacity' };
@@ -50,7 +63,8 @@ export class SessionManager {
       return { ok: false, reason: 'capacity' };
     }
 
-    this.sessions.set(peerId, { peerId, ws, lastActive: Date.now() });
+    const now = Date.now();
+    this.sessions.set(peerId, { peerId, ws, lastActive: now, position: ringPosition(peerId), joinedAt: now });
 
     ws.on('close', () => {
       // 自分が登録した接続のときだけ消す。
@@ -82,16 +96,16 @@ export class SessionManager {
    * 後者はそもそも受け取っていない。
    */
   public getRandomPeers(excludeId: string, maxPeers: number, randomInt: (n: number) => number): { peerId: string }[] {
-    const allIds = Array.from(this.sessions.keys()).filter((id) => id !== excludeId);
-
-    // Fisher-Yates shuffle (CSPRNG)。先頭 N 件固定だと、早期に接続した攻撃者ノードが
-    // 永久に紹介され続ける。
-    for (let i = allIds.length - 1; i > 0; i--) {
-      const j = randomInt(i + 1);
-      [allIds[i], allIds[j]] = [allIds[j], allIds[i]];
+    // 先頭 N 件固定だと、早期に接続した攻撃者ノードが永久に紹介され続ける。
+    // 近傍・新着以外の枠は CSPRNG でシャッフルして選ぶ (RingSelect)。
+    const self = this.sessions.get(excludeId);
+    const candidates: RingCandidate<string>[] = [];
+    for (const s of this.sessions.values()) {
+      if (s.peerId === excludeId) continue;
+      candidates.push({ item: s.peerId, position: s.position, joinedAt: s.joinedAt });
     }
-
-    return allIds.slice(0, maxPeers).map((peerId) => ({ peerId }));
+    const selfPosition = self ? self.position : ringPosition(excludeId);
+    return selectJoinPeers(selfPosition, candidates, maxPeers, randomInt).map((peerId) => ({ peerId }));
   }
 
   private cleanupPings(): void {
