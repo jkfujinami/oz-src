@@ -69,6 +69,12 @@ export default defineConfig({
             {
               entry: 'electron/main.ts',
               vite: {
+                define: {
+                  // ★ ws が optional 依存 (bufferutil / utf-8-validate) の空オブジェクトを参照して
+                  //   t.unmask is not a function でクラッシュするのを防ぐ (ビルド時にデッドコード削除させる)
+                  'process.env.WS_NO_BUFFER_UTIL': '"1"',
+                  'process.env.WS_NO_UTF_8_VALIDATE': '"1"',
+                },
                 build: {
                   outDir: 'dist-electron',
                 },

@@ -1,3 +1,6 @@
+process.env.WS_NO_BUFFER_UTIL = '1';
+process.env.WS_NO_UTF_8_VALIDATE = '1';
+
 import http from 'node:http';
 import dgram from 'node:dgram';
 import os from 'node:os';

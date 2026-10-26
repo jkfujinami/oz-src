@@ -1,3 +1,8 @@
+// ★ ws のネイティブ拡張 (bufferutil / utf-8-validate) の誤解決によるクラッシュを防止
+//   Vite でバンドルすると bufferutil が空モジュールとして解決され、t.unmask is not a function で落ちる
+process.env.WS_NO_BUFFER_UTIL = '1';
+process.env.WS_NO_UTF_8_VALIDATE = '1';
+
 import { app, BrowserWindow, Menu, Tray, nativeImage, dialog, Notification, ipcMain, powerMonitor, session, safeStorage } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
