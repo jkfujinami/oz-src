@@ -3,7 +3,7 @@
 process.env.WS_NO_BUFFER_UTIL = '1';
 process.env.WS_NO_UTF_8_VALIDATE = '1';
 
-import { app, BrowserWindow, Menu, Tray, nativeImage, dialog, Notification, ipcMain, powerMonitor, session, safeStorage } from 'electron';
+import { app, BrowserWindow, Menu, Tray, nativeImage, dialog, Notification, ipcMain, powerMonitor, session, safeStorage, powerSaveBlocker } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
 import { randomBytes } from 'node:crypto';
@@ -390,12 +390,17 @@ if (!gotTheLock) {
       },
       trackerService: createLocalTrackerService(),
     });
+    // ★ OS によるバックグラウンド凍結・App Nap・スリープによる通信遮断を強力に防止
+    powerSaveBlocker.start('prevent-app-suspension');
+
     // ★ 画面のロックとは関係なく動かす (画面のノードが止まっていても、Guard は利用者を受け入れ続ける)
     guardHost.startIfEnabled();
 
-    // ★ 画面ロック・スリープのときはロックする (席を離れた端末のメモリに鍵を残さない)
-    powerMonitor.on('suspend', () => sendCommand('lock'));
-    powerMonitor.on('lock-screen', () => sendCommand('lock'));
+    // ★ 画面ロック時に P2P 接続を切断させないため、自動ロックは行わない。
+    //   スリープからの復帰時にはネットワーク再接続を促す。
+    powerMonitor.on('resume', () => {
+      mainWindow?.webContents.send('oz:system-resume');
+    });
 
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) {

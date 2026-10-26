@@ -285,8 +285,8 @@ export function P2PProvider({
     setLockState('locked');
   }, []);
 
-  // 操作が無いまま (隠れている間も含めて) 一定時間が過ぎたら自動でロックする
-  useAutoLock({ enabled: lockState === 'ready', onLock: () => { void lock(); } });
+  // ★ P2P 常駐接続を維持するため、操作なしによる自動ロックは無効化する
+  useAutoLock({ enabled: false, onLock: () => { void lock(); } });
 
   const setTrackerUrl = useCallback(async (input: string | null): Promise<TrackerSaveResult> => {
     const current = nodeRef.current;

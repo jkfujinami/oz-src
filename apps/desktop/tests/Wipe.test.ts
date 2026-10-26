@@ -92,8 +92,7 @@ describe('メインプロセスの設定 (静的な確認)', () => {
     expect(main).not.toMatch(/crashReporter\.start/);
   });
 
-  it('スリープ・画面ロックでレンダラーへ lock を送る', () => {
-    expect(main).toMatch(/powerMonitor\.on\('suspend'/);
-    expect(main).toMatch(/powerMonitor\.on\('lock-screen'/);
+  it('powerSaveBlocker でアプリのサスペンドを抑止する', () => {
+    expect(main).toMatch(/powerSaveBlocker\.start\('prevent-app-suspension'\)/);
   });
 });
