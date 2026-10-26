@@ -39,10 +39,14 @@ export class PoWEngine {
       return PoWEngine.computeSync(header);
     }
 
-    const r = await WorkerBridge.request<{ nonce: number; solution: Uint8Array }>('compute', {
-      header: serializeHeader(header),
-    });
-    return { nonce: r.nonce, solution: new Uint8Array(r.solution) };
+    try {
+      const r = await WorkerBridge.request<{ nonce: number; solution: Uint8Array }>('compute', {
+        header: serializeHeader(header),
+      });
+      return { nonce: r.nonce, solution: new Uint8Array(r.solution) };
+    } catch {
+      return PoWEngine.computeSync(header);
+    }
   }
 
   /** メインスレッドで探索する。Worker が無い環境と単体テスト用。equixReady を済ませておくこと。 */

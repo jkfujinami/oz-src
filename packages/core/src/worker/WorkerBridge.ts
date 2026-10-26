@@ -24,7 +24,19 @@ export class WorkerBridge {
 
   static getWorker(): Worker {
     if (!this.worker) {
-      this.worker = new Worker(new URL('./pow.worker.js', import.meta.url), { type: 'module' });
+      let workerUrl: URL;
+      try {
+        if (typeof import.meta !== 'undefined' && import.meta?.url) {
+          workerUrl = new URL('./pow.worker.js', import.meta.url);
+        } else {
+          const base = typeof location !== 'undefined' ? location.href : 'http://localhost/';
+          workerUrl = new URL('./pow.worker.js', base);
+        }
+      } catch {
+        const base = typeof location !== 'undefined' ? location.href : 'http://localhost/';
+        workerUrl = new URL('./pow.worker.js', base);
+      }
+      this.worker = new Worker(workerUrl, { type: 'module' });
       this.worker.onmessage = (e) => this.handleMessage(e);
       this.worker.onerror = (err) => {
         log.error('Worker error:', err);

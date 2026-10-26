@@ -110,6 +110,8 @@ export interface GuardManagerOptions {
   fallbackGraceMs?: number;
   minOpenCandidates?: number;
   openSelectionDelayMs?: number;
+  /** 適応型オープン Guard 選出。候補数と接続方向に応じて待機時間・最小候補数を動的に調整する (既定: 未指定時は自動有効) */
+  adaptiveOpen?: boolean;
 }
 
 interface AcceptedList {
@@ -135,6 +137,7 @@ export class GuardManager implements GuardPolicy {
   private readonly fallbackGraceMs: number;
   private readonly minOpenCandidates: number;
   private readonly openSelectionDelayMs: number;
+  private readonly adaptiveOpen: boolean;
   private readonly configList?: string;
 
   private list: AcceptedList | null = null;
@@ -166,6 +169,7 @@ export class GuardManager implements GuardPolicy {
     this.powParams = options.powParams;
     this.sampleSize = options.sampleSize ?? GUARD_SAMPLE_SIZE;
     this.fallbackGraceMs = options.fallbackGraceMs ?? FALLBACK_GRACE_MS;
+    this.adaptiveOpen = options.adaptiveOpen ?? false;
     this.minOpenCandidates = options.minOpenCandidates ?? MIN_OPEN_CANDIDATES;
     this.openSelectionDelayMs = options.openSelectionDelayMs ?? OPEN_SELECTION_DELAY_MS;
   }
@@ -464,10 +468,36 @@ export class GuardManager implements GuardPolicy {
     // ★ 起動直後の「最初の 1 人」を Guard にしない。候補が 1 人だと重みづけが効かず、
     //   最初に握手を終えた隣人 (= トラッカーに居座る攻撃者) がそのまま Guard になる。
     //   ある程度の人数が揃い、少し時間が経ってから、重みづけで選ぶ。
+    //
+    // ★ Guard の接続方向 (direction):
+    //   トラッカーに常駐する攻撃者が受動的な Inbound 接続で Guard の座を奪う Preemption 攻撃を防ぐため、
+    //   自ノードが能動的に接続した Outbound ピアを優先する。
+    const outboundCandidates = eligible.filter(c => peers.get(c.peerId)?.direction === 'outbound');
+
+    // 最小候補数の決定:
+    // 単一候補 (1ノード) での選出は絶対に禁止 (CSPRNG 重みづけが機能せず攻撃者への決定論的固定となるため)。
+    // adaptiveOpen モードであっても最低 2 ノード以上の候補を必須とし、通常モードは MIN_OPEN_CANDIDATES (4) を適用。
+    const minCandidates = this.adaptiveOpen
+      ? Math.max(2, Math.min(this.minOpenCandidates, 2))
+      : this.minOpenCandidates;
+
+    let delay = this.openSelectionDelayMs;
+    if (this.adaptiveOpen) {
+      // Outbound ピアが複数確保されている場合のみ安全に遅延を短縮する
+      if (outboundCandidates.length >= 4) {
+        delay = Math.min(this.openSelectionDelayMs, 3000);
+      } else if (outboundCandidates.length >= 2) {
+        delay = Math.min(this.openSelectionDelayMs, 5000);
+      } else {
+        // Outbound が不足している場合は安易に短縮せず、メッシュ形成を待つ
+        delay = Math.min(this.openSelectionDelayMs, 10000);
+      }
+    }
+
     if (
-      eligible.length < this.minOpenCandidates ||
+      eligible.length < minCandidates ||
       this.firstVerifiedAt === null ||
-      now - this.firstVerifiedAt < this.openSelectionDelayMs
+      now - this.firstVerifiedAt < delay
     ) {
       return this.report('none', null, this.listExpired(now) ? 'list-expired' : 'waiting-for-candidates');
     }

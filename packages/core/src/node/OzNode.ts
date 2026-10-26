@@ -80,6 +80,8 @@ export interface OzNodeConfig {
   turnstileToken?: string;
   db?: IndexedDBStore;
   autoStart?: boolean;
+  /** 同一出所 (同じ LAN・同じ IP) の隣人を Guard・中継に使うことを許可するか (★ テスト・エミュレータ専用) */
+  allowSameOriginHops?: boolean;
   /**
    * オニオン回路のパラメータ。★ テスト専用 (タイマーを縮めるとき)。
    * 本番コードは渡さないこと。網の挙動は全ノードで同一でなければならない。
@@ -142,7 +144,7 @@ export interface OzNodeConfig {
   };
   guardOptions?: Pick<
     GuardManagerOptions,
-    'fallbackGraceMs' | 'minOpenCandidates' | 'openSelectionDelayMs' | 'sampleSize' | 'now' | 'randomIndex'
+    'fallbackGraceMs' | 'minOpenCandidates' | 'openSelectionDelayMs' | 'sampleSize' | 'now' | 'randomIndex' | 'adaptiveOpen'
   >;
 }
 
@@ -364,7 +366,19 @@ export class OzNode {
       rateLimiter,
       iceServers,
       // ★ 経路の各段が同じ端末でもよいのは、トラッカーが自分の端末 (開発用の網) のときだけ
-      allowSameOriginHops: () => isLoopbackTrackerUrl(signaling.url ?? null),
+      allowSameOriginHops: () => {
+        if (isLoopbackTrackerUrl(signaling.url ?? null)) {
+          return true;
+        }
+        if (config.allowSameOriginHops) {
+          log.warn(
+            'allowSameOriginHops is explicitly enabled. This is strictly for single-machine emulation/testing ' +
+            'and completely compromises anonymity if used on public networks.'
+          );
+          return true;
+        }
+        return false;
+      },
       reannounceBelowDegree: RING_MESH.OUTBOUND_TARGET,
       // 試行中の接続の上限。一般ノードは次数の上限 (MAX_DEGREE) まで。
       // 既定の 8 では、JOIN 直後の紹介 (8) と PEX・inbound が重なると取りこぼす
@@ -385,6 +399,7 @@ export class OzNode {
         get: (name) => db.getSetting(name),
         set: (name, value) => db.setSetting(name, value),
       },
+      adaptiveOpen: config.guardOptions?.adaptiveOpen ?? false,
       ...config.guardOptions,
     });
     await guards.init();

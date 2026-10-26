@@ -18,6 +18,10 @@ export async function computeChunkPow(
   await sodium.ready;
   const effort = opts.effort ?? CHUNK_EFFORT;
   if (typeof Worker === 'undefined') return solveChunkPow(chunkId, { effort, shouldStop: opts.shouldStop });
-  const r = await WorkerBridge.request<{ nonce: number; solution: Uint8Array }>('chunk-pow', { chunkId, effort });
-  return { nonce: r.nonce, solution: new Uint8Array(r.solution) };
+  try {
+    const r = await WorkerBridge.request<{ nonce: number; solution: Uint8Array }>('chunk-pow', { chunkId, effort });
+    return { nonce: r.nonce, solution: new Uint8Array(r.solution) };
+  } catch {
+    return solveChunkPow(chunkId, { effort, shouldStop: opts.shouldStop });
+  }
 }

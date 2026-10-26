@@ -55,6 +55,7 @@ export interface IPeerConnection {
   readonly isConnected: boolean;
   /** HELLO/JOIN のハンドシェイクで Bound Identity を検証済みか */
   readonly isVerified: boolean;
+  readonly direction?: 'inbound' | 'outbound';
   send(msg: Uint8Array | string): void;
   close(): void;
 }
