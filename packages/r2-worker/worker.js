@@ -50,6 +50,10 @@ const ALLOWED_LOCKER_HOSTS = new Set([
   'api.gofile.io',
   'upload.gofile.io',
   'pixeldrain.com',
+  // 2026-10 の実地テストで通ったもの (core の OZZY_LOCKER_API_HOSTS / OZZY_FETCH_ALLOWED_HOSTS と揃える)
+  'anonhost.cc',
+  'r2.anonhost.cc',
+  'tmpfile.link',
 ]);
 
 function isAllowedOverseasLockerHost(hostname) {
@@ -59,7 +63,8 @@ function isAllowedOverseasLockerHost(hostname) {
     h.endsWith('.archive.org') ||
     h.endsWith('.gofile.io') ||
     h.endsWith('.catbox.moe') ||
-    h.endsWith('.uguu.se')
+    h.endsWith('.uguu.se') ||
+    h.endsWith('.tempfilestorage.link')
   ) {
     return true;
   }

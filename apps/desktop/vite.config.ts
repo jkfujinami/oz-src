@@ -39,7 +39,8 @@ const CSP = [
   "media-src 'self' blob:",
   "font-src 'self' data:",
   "worker-src 'self' blob:",
-  "connect-src 'self' https: wss: ws:",
+  // ozlocker: は Ozzy がロッカーへ直接つなぐ口 (electron/ozlocker.ts。main が許可したロッカーへだけ行く)
+  "connect-src 'self' https: wss: ws: ozlocker:",
   "object-src 'none'",
   "base-uri 'none'",
   "form-action 'none'",

@@ -31,7 +31,8 @@ describe('信頼 Guard と Onion 回路の結合', () => {
     const exit = await createSimNode('exit');
     const guards = new GuardManager({
       keyset: m.keyset,
-      guardList: makeList(m, [trusted.identity]),
+      // ★ 実際の時計で動くテスト: リストも今の時刻で作る (固定の NOW だと、その 30 日後に期限が切れて open になる)
+      guardList: makeList(m, [trusted.identity], { now: Date.now() }),
       powParams: FAST_POW,
       ...timing,
     });

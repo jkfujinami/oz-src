@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useP2P } from '../providers/P2PProvider';
 import { StunSettings } from './StunSettings';
+import { useT } from '../i18n';
 import { STANDARD_TRACKERS } from '../lib/trackerSetting';
 
 /**
@@ -10,6 +11,7 @@ import { STANDARD_TRACKERS } from '../lib/trackerSetting';
  *   信頼できる配布元から受け取った URL だけを設定してもらう。
  */
 export function TrackerSettings({ onClose }: { onClose?: () => void }) {
+  const t = useT();
   const { trackerUrl, setTrackerUrl } = useP2P();
   const [input, setInput] = useState(trackerUrl ?? '');
   const [message, setMessage] = useState<{ kind: 'error' | 'notice' | 'ok'; text: string } | null>(null);
@@ -22,7 +24,7 @@ export function TrackerSettings({ onClose }: { onClose?: () => void }) {
       const r = await setTrackerUrl(value);
       if (!r.ok) setMessage({ kind: 'error', text: r.error });
       else if (r.notice) setMessage({ kind: 'notice', text: r.notice });
-      else setMessage({ kind: 'ok', text: value === null ? '設定を消しました' : '保存しました' });
+      else setMessage({ kind: 'ok', text: value === null ? t('settings.tracker.reset') : t('settings.tracker.saved') });
       if (r.ok && value === null) setInput('');
     } finally {
       setBusy(false);
@@ -33,21 +35,19 @@ export function TrackerSettings({ onClose }: { onClose?: () => void }) {
 
   return (
     <div style={{ fontSize: '12px', lineHeight: 1.6 }}>
-      <div style={{ fontWeight: 700, marginBottom: '4px' }}>トラッカー</div>
+      <div style={{ fontWeight: 700, marginBottom: '4px' }}>{t('settings.tracker.title')}</div>
       <div style={{ color: 'var(--text-dim)', marginBottom: '8px' }}>
-        参加者同士を最初に引き合わせるサーバです。公式のトラッカーはありません。
-        トラッカーの運営者には、接続したときの IP アドレスが見えます。
-        信頼できる配布元から受け取った URL だけを設定してください。
+        {t('settings.tracker.desc')}
       </div>
       <div style={{ marginBottom: '6px' }}>
-        現在: {trackerUrl
+        {t('settings.tracker.current')}{trackerUrl
           ? <code style={{ wordBreak: 'break-all' }}>{trackerUrl}</code>
-          : <span style={{ color: 'var(--warn)' }}>未設定 (他の参加者を見つけられません)</span>}
+          : <span style={{ color: 'var(--warn)' }}>{t('settings.tracker.unset')}</span>}
       </div>
       <div className="input-group">
         <input
-          aria-label="トラッカーの URL"
-          placeholder="wss://... または oz-tracker:..."
+          aria-label={t('settings.tracker.urlLabel')}
+          placeholder={t('settings.tracker.placeholder')}
           value={input}
           spellCheck={false}
           autoComplete="off"
@@ -60,7 +60,7 @@ export function TrackerSettings({ onClose }: { onClose?: () => void }) {
             style={{ fontSize: '11px', padding: '3px 8px', borderColor: 'var(--line-strong)', color: 'var(--text-2)' }}
             onClick={() => setInput(STANDARD_TRACKERS.cloudflare)}
           >
-            Cloudflare Workers (標準)
+            {t('settings.tracker.cloudflare')}
           </button>
           <button
             type="button"
@@ -68,15 +68,15 @@ export function TrackerSettings({ onClose }: { onClose?: () => void }) {
             style={{ fontSize: '11px', padding: '3px 8px', borderColor: 'var(--line-strong)', color: 'var(--text-2)' }}
             onClick={() => setInput(STANDARD_TRACKERS.deno)}
           >
-            Deno Deploy
+            {t('settings.tracker.deno')}
           </button>
         </div>
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '8px' }}>
-          {onClose && <button className="btn" onClick={onClose}>閉じる</button>}
+          {onClose && <button className="btn" onClick={onClose}>{t('settings.tracker.close')}</button>}
           {trackerUrl && (
-            <button className="btn" disabled={busy} onClick={() => void apply(null)}>設定を消す</button>
+            <button className="btn" disabled={busy} onClick={() => void apply(null)}>{t('settings.tracker.clear')}</button>
           )}
-          <button className="btn" disabled={busy || !input.trim()} onClick={() => void apply(input)}>保存</button>
+          <button className="btn" disabled={busy || !input.trim()} onClick={() => void apply(input)}>{t('settings.tracker.save')}</button>
         </div>
         {message && (
           <div role={message.kind === 'error' ? 'alert' : 'status'} style={{ color, fontSize: '11px', marginTop: '6px' }}>

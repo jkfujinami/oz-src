@@ -13,3 +13,4 @@ export * from './SlabReader';
 export * from './OzzyStream';
 export * from './WorkerPool';
 export * from './OnionLockers';
+export * from './DirectLockerTransport';

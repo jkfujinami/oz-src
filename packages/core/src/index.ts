@@ -6,11 +6,12 @@
 export { type GossipPacket, type IPeerManager, type IKeyManager, type IPoWEngine } from './types';
 
 // ── Facade Node ──
-export { OzNode, type OzNodeConfig } from './node/OzNode';
+export { OzNode, type OzNodeConfig, type NodeDiagnostics } from './node/OzNode';
 
 // ── Common ──
 export { Encoding } from './common/Encoding';
-export { createLogger, Logger, LogLevel, setLevel, currentLevels, installConsoleHandle } from './common/Logger';
+export { createLogger, Logger, LogLevel, setLevel, currentLevels, installConsoleHandle, resetLevels, levelFor, onLogRecord, type LogRecord, type LogLevelValue } from './common/Logger';
+export { LogHistory, LOG_HISTORY_CAPACITY } from './common/LogHistory';
 
 // ── Crypto & Identity ──
 export { default as sodium, sodiumReady } from './crypto/sodium';
@@ -67,7 +68,7 @@ export { type DAGPost } from './logic/ThreadDAGManager';
 export { ThreadClosedError } from './logic/ThreadClosedError';
 export type { ThreadState } from './logic/ThreadDAGManager';
 export { THREAD_LIMITS } from './logic/ThreadLimits';
-export type { ThreadMeta, BoardStatus, ThreadStatus } from './logic/types';
+export type { ThreadMeta, BoardStatus, ThreadStatus, StatusText, StatusParams } from './logic/types';
 export { posterId } from './logic/PosterId';
 
 // ── Storage ──

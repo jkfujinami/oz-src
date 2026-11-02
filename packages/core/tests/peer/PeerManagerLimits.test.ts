@@ -125,6 +125,26 @@ describe('PeerManager: フレーム長とレート制限', () => {
     expect(count.ping).toBe(1);
   });
 
+  it('信頼 Guard からのトンネルは広い枠 (tunnelBackbone) で数え、それ以外の相手は従来の枠 (tunnel) のまま', () => {
+    const limiter = new RateLimiter(RATE_LIMITS, () => 0);
+    const { pm, dispatcher } = manager({ rateLimiter: limiter });
+    const GUARD = hexId(0x6a7d);
+    const guard = verifiedPeer(pm, GUARD);
+    guard.pubkey = Uint8Array.of(7);
+    verifiedPeer(pm, PEER);
+    pm.setGuardSource({ wantedGuardIds: () => [], isTrusted: (id, key) => id === GUARD && key?.[0] === 7 });
+    const from = new Map<string, number>();
+    dispatcher.register(WireType.TUNNEL_RESULT, (peerId) => from.set(peerId, (from.get(peerId) ?? 0) + 1));
+
+    const n = RATE_LIMITS.tunnelBackbone.burst + 100;
+    for (let i = 0; i < n; i++) {
+      feed(pm, GUARD, frameFor(WireType.TUNNEL_RESULT, i));
+      feed(pm, PEER, frameFor(WireType.TUNNEL_RESULT, i));
+    }
+    expect(from.get(GUARD)).toBe(RATE_LIMITS.tunnelBackbone.burst);
+    expect(from.get(PEER)).toBe(RATE_LIMITS.tunnel.burst);
+  });
+
   it('同じカテゴリに属する WireType は予算を共有する (STEM で GOSSIP の枠を迂回できない)', () => {
     const limiter = new RateLimiter(RATE_LIMITS, () => 0);
     const { pm, dispatcher } = manager({ rateLimiter: limiter });

@@ -114,6 +114,14 @@ export class LeaseSetStore {
     return out.map(e => e.ls.bytes);
   }
 
+  /** 期限内で最も早く切れる leaseSet の期限 (ms)。無ければ null。網の古さの目安 (期限 = 発行 + 6 時間) */
+  public earliestExpiresMs(): number | null {
+    const now = this.now();
+    let min: number | null = null;
+    for (const e of this.bySid.values()) if (e.expiresMs > now && (min === null || e.expiresMs < min)) min = e.expiresMs;
+    return min;
+  }
+
   /** 期限内の全枠。担当の計算 (Duty) が使う。順序は不定 */
   public allSlots(): SlotEntry[] {
     const now = this.now();

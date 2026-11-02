@@ -308,7 +308,9 @@ export class FileUploader {
     }
     if (!this.alive()) throw this.cancelled ? new FileTransferError('cancelled') : (this.failure ?? new FileTransferError('cancelled'));
     if (placed.size < R_MIN_OK) {
-      throw new FileTransferError('insufficient-replicas', `only ${placed.size} of ${R_MIN_OK} replicas could be placed`);
+      throw new FileTransferError('insufficient-replicas', `only ${placed.size} of ${R_MIN_OK} replicas could be placed`, {
+        placed: placed.size, needed: R_MIN_OK,
+      });
     }
     return placed.size;
   }

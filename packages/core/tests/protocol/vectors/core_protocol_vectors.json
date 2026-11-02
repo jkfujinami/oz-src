@@ -111,6 +111,10 @@
         "ratePerSec": 200,
         "burst": 600
       },
+      "tunnelBackbone": {
+        "ratePerSec": 2400,
+        "burst": 4800
+      },
       "ozzy": {
         "ratePerSec": 3000,
         "burst": 6000

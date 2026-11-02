@@ -4,7 +4,8 @@ import { Encoding } from '../../src/common/Encoding';
 import { DAY_MS, msToMinutes } from '../../src/crypto/PowPolicy';
 import { encodePacket } from '../../src/crypto/PacketCodec';
 import { StorageIdentity } from '../../src/network/storage/StorageIdentity';
-import { HistoryClient, FETCH_MAX_PAST_MS } from '../../src/network/history/HistoryClient';
+import { HistoryClient, FETCH_MAX_PAST_MS, HISTORY_LIMITS } from '../../src/network/history/HistoryClient';
+import { TUNNEL_ERROR_CODE } from '../../src/network/wire/WireCodec';
 import { FETCH_STATUS, encodeFetchResponse, decodeFetchRequest } from '../../src/network/history/FetchBucket';
 import { encryptChunk, parseRequestPlain } from '../../src/network/tunnel/TunnelCrypto';
 import { makePacket, sleep } from '../helpers/onionNet';
@@ -15,7 +16,7 @@ const NOW = Date.now();
 const BIRTH = Math.floor((NOW - 10 * DAY_MS) / DAY_MS);
 const T0 = BIRTH * DAY_MS + 3600_000;
 
-interface FakeHolder { id: StorageIdentity; sid: string; gateway: string; behavior: (req: { since: number }, send: (seq: number, final: boolean, data: Uint8Array) => void, kind: number, key: Uint8Array) => void | Promise<void>; asked: number }
+interface FakeHolder { id: StorageIdentity; sid: string; gateway: string; behavior: (req: { since: number }, send: (seq: number, final: boolean, data: Uint8Array) => void, kind: number, key: Uint8Array, fail?: (code: number) => void) => void | Promise<void>; asked: number }
 
 let packets: GossipPacket[];
 beforeAll(async () => {
@@ -24,13 +25,13 @@ beforeAll(async () => {
 }, 30_000);
 
 /** 偽のトンネル: 封印を保持者の鍵で開け、保持者ごとの振る舞いで応答の片を返す */
-async function setup(n: number, opts: { random?: () => number; maxAttempts?: number } = {}) {
+async function setup(n: number, opts: { random?: () => number; maxAttempts?: number; hedgeMs?: number; inactivityMs?: number; gapGraceMs?: number; sameGateway?: boolean } = {}) {
   const holders: FakeHolder[] = [];
   const leases = new Map<string, any>();
   for (let i = 0; i < n; i++) {
     const id = await StorageIdentity.loadOrCreate(null, 1);
     const sid = Encoding.toHex(id.publicKey);
-    const h: FakeHolder = { id, sid, gateway: (i + 1).toString(16).padStart(32, '0'), behavior: () => {}, asked: 0 };
+    const h: FakeHolder = { id, sid, gateway: (opts.sameGateway ? 1 : i + 1).toString(16).padStart(32, '0'), behavior: () => {}, asked: 0 };
     holders.push(h);
     leases.set(sid, { sid: id.publicKey, gateway: h.gateway, tunnelId: new Uint8Array(8) });
   }
@@ -41,7 +42,7 @@ async function setup(n: number, opts: { random?: () => number; maxAttempts?: num
   const tunnel = {
     get firstHop() { return firstHop; },
     request(req: any, handler: (ev: any) => void) {
-      const h = holders.find(x => x.gateway === req.gateway)!;
+      const h = holders.find(x => x.gateway === req.gateway && x.id.openSealed(req.body))!;
       const plain = h.id.openSealed(req.body);
       const r = parseRequestPlain(plain!)!;
       const fr = decodeFetchRequest(r.payload)!;
@@ -51,7 +52,8 @@ async function setup(n: number, opts: { random?: () => number; maxAttempts?: num
       const send = (seq: number, final: boolean, data: Uint8Array, clearFinal = final) => {
         if (!cancelled) handler({ type: 'chunk', seq, final: clearFinal, body: encryptChunk(r.respKey, r.kind, seq, final, data) });
       };
-      queueMicrotask(() => { void h.behavior(fr, send as any, r.kind, r.respKey); });
+      const fail = (code: number) => { if (!cancelled) handler({ type: 'error', code }); };
+      queueMicrotask(() => { void h.behavior(fr, send as any, r.kind, r.respKey, fail); });
       return { reqId: 1, cancel: () => { cancelled = true; } };
     },
   };
@@ -66,7 +68,10 @@ async function setup(n: number, opts: { random?: () => number; maxAttempts?: num
     deliver: (p) => { delivered.push(p); },
     ownSid: () => null,
     random: opts.random ?? (() => 0.5),
-    limits: { hedgeMs: 60, inactivityMs: 300, readyWaitMs: 150, holdersWaitMs: 30, holdersPollMs: 5, maxAttempts: opts.maxAttempts },
+    limits: {
+      hedgeMs: opts.hedgeMs ?? 60, inactivityMs: opts.inactivityMs ?? 300, gapGraceMs: opts.gapGraceMs,
+      readyWaitMs: 150, holdersWaitMs: 30, holdersPollMs: 5, maxAttempts: opts.maxAttempts,
+    },
   });
   return { holders, client, delivered, requests, setFirstHop: (v: string | null) => { firstHop = v; }, fireVerified: () => listeners.forEach(cb => cb({ peerId: firstHop })) };
 }
@@ -169,6 +174,24 @@ describe('HistoryClient: 保持者の選び方と検証', () => {
     expect((await c.client.fetchBucket(BIRTH, TAG, { since: 0 })).completed).toBe(false);
   });
 
+  it('★最後の片が届いたのに途中が欠けていたら、無通信の時間切れを待たずに次の保持者へ回る (GAP_GRACE_MS)', async () => {
+    // 時間切れと hedge は十分に長く、猶予だけ短くする: 猶予で諦めなければこのテストは時間内に終わらない
+    c = await setup(3, { hedgeMs: 10_000, inactivityMs: 10_000, gapGraceMs: 20 });
+    const payload = encodeFetchResponse({ status: 0, nextSince: 0, packets: packets.map(encodePacket) });
+    const a = payload.slice(0, 100), b = payload.slice(100, 200), d = payload.slice(200);
+    let asked = 0;
+    // 最初に頼んだ 2 台は真ん中の片を途中で落とされる。3 台目は全部届く
+    c.holders.forEach(h => (h.behavior = (_r, send) => {
+      const broken = asked++ < 2;
+      (send as any)(0, false, a);
+      if (!broken) (send as any)(1, false, b);
+      (send as any)(2, true, d);
+    }));
+    const t0 = performance.now();
+    expect(await c.client.fetchBucket(BIRTH, TAG, { since: 0 })).toMatchObject({ completed: true, packets: 3, attempts: 3 });
+    expect(performance.now() - t0).toBeLessThan(2_000);
+  });
+
   it('★復号できない片 (改ざん) が 3 つ来たら、その要求は諦める (inactivity を待たない)', async () => {
     c = await setup(1);
     c.holders[0].behavior = (_r, _s, kind, key) => {
@@ -189,6 +212,39 @@ describe('HistoryClient: 保持者の選び方と検証', () => {
     expect(res.completed).toBe(false);
     expect(performance.now() - t0).toBeLessThan(250);
     expect(c.client.stats.badChunks).toBe(3);
+  });
+
+  it('★届かなかった保持者 (片が 1 つも来ないまま時間切れ) は、しばらく候補から外す: 空のバケットごとに時間切れを待たない', async () => {
+    c = await setup(3, { inactivityMs: 200, hedgeMs: 10_000 });
+    const dead = c.holders[0];
+    dead.behavior = () => {}; // 黙っている (落ちたのに leaseSet だけ残っている)
+    c.holders[1].behavior = answer([], FETCH_STATUS.NOT_HELD);
+    c.holders[2].behavior = answer([], FETCH_STATUS.NOT_HELD);
+    // 空のバケット: 全員に聞くまで終わらない。1 回目は時間切れを待つ
+    expect(await c.client.fetchBucket(BIRTH, TAG, { since: 0 })).toMatchObject({ completed: false, reason: 'exhausted', attempts: 3 });
+    expect(dead.asked).toBe(1);
+    // 別の空のバケットでは、黙った保持者に聞かない (時間切れを待たずにすぐ終わる)
+    const t0 = performance.now();
+    expect(await c.client.fetchBucket(BIRTH, TAG + 1, { since: 0 })).toMatchObject({ completed: false, reason: 'exhausted', attempts: 2 });
+    expect(performance.now() - t0).toBeLessThan(150);
+    expect(dead.asked).toBe(1);
+  });
+
+  it('★候補が全員「届かなかった」なら外さずに試す (候補が 0 にならない)', async () => {
+    c = await setup(1, { inactivityMs: 100 });
+    c.holders[0].behavior = () => {};
+    await c.client.fetchBucket(BIRTH, TAG, { since: 0 });
+    c.holders[0].behavior = answer(packets);
+    expect(await c.client.fetchBucket(BIRTH, TAG, { since: 0 })).toMatchObject({ completed: true, packets: 3 });
+    expect(c.holders[0].asked).toBe(2);
+  });
+
+  it('★失敗の罰が付いた保持者 (記録が時間切れより遅い) は、記録の無い保持者より後ろに回す', async () => {
+    c = await setup(3);
+    c.holders.forEach(h => (h.behavior = answer([])));
+    c.client.recordSpeed(c.holders[0].sid, 60_000);
+    await c.client.fetchBucket(BIRTH, TAG, { since: 5 });
+    expect(new Set(c.requests.slice(0, 2).map(r => r.holder))).toEqual(new Set([c.holders[1], c.holders[2]]));
   });
 
   it('★試す保持者の数に上限 (maxAttempts)。全員が失敗すれば exhausted', async () => {
@@ -229,7 +285,7 @@ describe('HistoryClient: 保持者の選び方と検証', () => {
     expect(n).toBe(2);
   });
 
-  it('同時に走る取得は 4 本まで (板の 13 週 + スレを一度に浴びせない)', async () => {
+  it('★同じ受け口への要求は同時 3 本まで (板の 13 週を一度に出しても、旧版の受け口に浴びせない)。別々の受け口なら一度に出せる', async () => {
     c = await setup(1);
     let running = 0, peak = 0;
     c.holders[0].behavior = async (_r, send) => {
@@ -238,9 +294,64 @@ describe('HistoryClient: 保持者の選び方と検証', () => {
       running--;
       send(0, true, encodeFetchResponse({ status: 0, nextSince: 0, packets: [] }));
     };
-    const rs = await Promise.all(Array.from({ length: 10 }, () => c.client.fetchBucket(BIRTH, TAG, { since: 3 })));
+    const rs = await Promise.all(Array.from({ length: 13 }, () => c.client.fetchBucket(BIRTH, TAG, { since: 3 })));
     expect(rs.every(r => r.completed)).toBe(true);
-    expect(peak).toBeLessThanOrEqual(4);
+    expect(peak).toBe(HISTORY_LIMITS.PER_GATEWAY_INFLIGHT);
+    c.client.destroy();
+
+    // 受け口が別々なら、13 本の取得が同時に走る (取得の同時数の上限 16 の内側)。頼む順は取得ごとに散らす
+    let x = 7;
+    c = await setup(13, { random: () => ((x = (x * 9301 + 49297) % 233280) / 233280) });
+    let inFlight = 0, most = 0;
+    c.holders.forEach(h => (h.behavior = async (_r, send) => {
+      inFlight++; most = Math.max(most, inFlight);
+      await sleep(30);
+      inFlight--;
+      send(0, true, encodeFetchResponse({ status: 0, nextSince: 0, packets: [] }));
+    }));
+    const all = await Promise.all(Array.from({ length: 13 }, (_, i) => c.client.fetchBucket(BIRTH, TAG + i, { since: 3 })));
+    expect(all.every(r => r.completed)).toBe(true);
+    expect(most).toBeGreaterThanOrEqual(13);
     void msToMinutes;
+  });
+
+  it('★混んでいて断られた (BUSY) ら、保持者の失敗に数えず、待って同じ保持者に頼み直す', async () => {
+    c = await setup(1, { maxAttempts: 1 });
+    let n = 0;
+    c.holders[0].behavior = (_r, send, _k, _key, fail) => {
+      if (n++ === 0) return fail!(TUNNEL_ERROR_CODE.BUSY);
+      send(0, true, encodeFetchResponse({ status: FETCH_STATUS.OK, nextSince: 0, packets: packets.map(encodePacket) }));
+    };
+    const res = await c.client.fetchBucket(BIRTH, TAG, { since: 0 });
+    expect(res).toMatchObject({ completed: true, packets: 3, attempts: 1 });
+    expect(c.holders[0].asked).toBe(2);
+    expect(c.client.speedOf(c.holders[0].sid)).toBeLessThan(HISTORY_LIMITS.FAIL_PENALTY_MS);
+  });
+
+  it('★保持者ごとに持っている投稿が違う (参加前・落ちていた間の分が無い) とき、2 台の「全部です」を合わせる', async () => {
+    // 実網で、1 台の答えで終えて欠けが残り、端末ごとにスレやレスの揃い方が違った
+    c = await setup(4);
+    c.holders[0].behavior = answer([packets[0], packets[1]]);
+    c.holders[1].behavior = answer([packets[1], packets[2]]);
+    c.holders[2].behavior = answer([], FETCH_STATUS.NOT_HELD);
+    c.holders[3].behavior = answer([], FETCH_STATUS.NOT_HELD);
+    c.client.recordSpeed(c.holders[0].sid, 1);
+    c.client.recordSpeed(c.holders[1].sid, 2);
+    const res = await c.client.fetchBucket(BIRTH, TAG, { since: 0 });
+    expect(res).toMatchObject({ completed: true, packets: 3, attempts: 2 });
+    expect(c.delivered).toHaveLength(3);
+  });
+
+  it('★投稿を持っているのが候補の 1 台だけでも、「持っていない」が続いても打ち切らずにたどり着く (全員に聞いて 1 台なら完了)', async () => {
+    c = await setup(6, { maxAttempts: 8 });
+    c.holders.forEach(h => (h.behavior = answer([], FETCH_STATUS.NOT_HELD)));
+    const keeper = c.holders[3];
+    keeper.behavior = answer(packets);
+    c.client.recordSpeed(keeper.sid, 60_000); // 最後に回る
+    const res = await c.client.fetchBucket(BIRTH, TAG, { since: 0 });
+    expect(res).toMatchObject({ completed: true, packets: 3, attempts: 6 });
+    // スレの無い週 (全員が持っていない): 全員に聞いて、取り切ったことにはしない
+    c.holders.forEach(h => (h.behavior = answer([], FETCH_STATUS.NOT_HELD)));
+    expect(await c.client.fetchBucket(BIRTH, TAG + 1, { since: 0 })).toMatchObject({ completed: false, reason: 'exhausted', attempts: 6 });
   });
 });

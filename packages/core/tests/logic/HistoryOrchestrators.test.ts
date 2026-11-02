@@ -18,7 +18,7 @@ import { attachTunnel, attachBehind, stopTunnel, until } from '../helpers/tunnel
 
 /** 窓口の代役: 呼ばれた引数を記録し、テストが完了を制御する */
 function fakeHistory() {
-  const calls: Array<{ birthDay: number; tag: number; since: number; resolve: () => void; progress: (n: number) => void; signal?: AbortSignal }> = [];
+  const calls: Array<{ birthDay: number; tag: number; since: number; resolve: (completed?: boolean) => void; progress: (n: number) => void; signal?: AbortSignal }> = [];
   const readyCbs = new Set<() => void>();
   let running = 0, peak = 0;
   const history: HistoryFetcher = {
@@ -27,7 +27,7 @@ function fakeHistory() {
       running++; peak = Math.max(peak, running);
       calls.push({
         birthDay, tag, since: opts.since ?? 0, signal: opts.signal, progress: (n) => opts.onProgress?.(n),
-        resolve: () => { running--; resolve({ completed: true, packets: 0, attempts: 1, reason: 'ok' }); },
+        resolve: (completed = true) => { running--; resolve({ completed, packets: 0, attempts: 1, reason: completed ? 'ok' : 'exhausted' } as any); },
       });
     }),
   };
@@ -61,23 +61,42 @@ describe('ThreadOrchestrator: 開いたとき保管担当から過去ログを�
     const key = KeyManager.deriveThreadKey(boardKey, threadId);
     const birth = dayOf(Date.now() - 6 * DAY_MS);
     expect(f.calls[0]).toMatchObject({ birthDay: birth, tag: threadTag(key, birth), since: 0 });
-    expect(thread.getStatus()).toMatchObject({ phase: 'syncing', message: '過去ログを取得中...' });
+    expect(thread.getStatus()).toMatchObject({ phase: 'syncing', code: 'history-fetching', message: '過去ログを取得中...' });
     f.calls[0].progress(3);
     expect(thread.getStatus().message).toBe('過去ログを取得中... (3件)');
+    expect(thread.getStatus()).toMatchObject({ code: 'history-fetching', params: { count: 3 } });
     f.calls[0].resolve();
     await waitFor(() => !thread.getStatus().message.includes('過去ログを取得中'));
   });
 
-  it('★手元に投稿があれば since = 手元の最新の投稿の時刻 − 5 分。旧形式のスレ ID (スレ立て日なし) は取らない', async () => {
+  it('★手元に最新のレスがあっても (追いつきで先に届いただけかもしれない)、取り切った記録が無ければ since = 0。取り切ったあと開き直すと since = 取り切った時刻 − 5 分。取り切れなければ記録は進まない。旧形式のスレ ID は取らない', async () => {
+    // 実網で、追いつきで届いた最新のレスを基準に since を決め、それより前のレスを取りに行かずに抜けていた
     boardKey = sodium.randombytes_buf(32);
     const threadId = makeThreadId(Date.now() - 6 * DAY_MS, 'abcdefghij');
     const key = KeyManager.deriveThreadKey(boardKey, threadId);
     const f = fakeHistory();
-    const { router } = await make(f);
+    const { router, store } = await make(f);
     const when = Math.floor((Date.now() - 2 * DAY_MS) / MINUTE_MS) * MINUTE_MS;
-    router.recent = [await buildReplyPacket(key, BOARD, threadId, '手元にある', customSigner(), { now: when })];
+    router.recent = [await buildReplyPacket(key, BOARD, threadId, '追いつきで届いた最新のレス', customSigner(), { now: when })];
     await thread.activate(BOARD, threadId, boardKey);
-    expect(f.calls[0].since).toBe(msToMinutes(when - 5 * MINUTE_MS));
+    expect(f.calls[0].since).toBe(0);
+    f.calls[0].resolve(false); // どの保持者からも取り切れなかった
+    await waitFor(() => !thread.getStatus().message.includes('過去ログ'));
+    thread.clear();
+
+    const g = fakeHistory();
+    await make(g, store);
+    await thread.activate(BOARD, threadId, boardKey);
+    expect(g.calls[0].since).toBe(0); // 記録は進んでいない
+    const t0 = Date.now();
+    g.calls[0].resolve();
+    await waitFor(() => !thread.getStatus().message.includes('過去ログ'));
+    thread.clear();
+
+    const h = fakeHistory();
+    await make(h, store);
+    await thread.activate(BOARD, threadId, boardKey);
+    expect(Math.abs(h.calls[0].since - (msToMinutes(t0) - 5))).toBeLessThanOrEqual(1);
     thread.clear();
     const legacy = fakeHistory();
     await make(legacy);
@@ -112,7 +131,7 @@ describe('BoardOrchestrator: 板を開いたとき直近 13 週のスレ立て�
   let board: BoardOrchestrator;
   afterEach(() => board?.clear());
 
-  it('★新しい週から順に 13 本、同時 3 本まで。バケット = (週の月曜の日番号, 板の鍵の tag)。手元のスレ立てがある週は since がその最新 − 5 分', async () => {
+  it('★13 週を一度に (新しい週から)。バケット = (週の月曜の日番号, 板の鍵の tag)。手元にスレ立てがあっても since は 0、取り切った週は次に開いたとき その時刻 − 5 分', async () => {
     const boardKey = sodium.randombytes_buf(32);
     const f = fakeHistory();
     const pm = new FakePeerManager();
@@ -124,27 +143,31 @@ describe('BoardOrchestrator: 板を開いたとき直近 13 週のスレ立て�
     router.recent = [await buildThreadMetaPacket(boardKey, BOARD, makeThreadId(when, 'abcdefghij'), '手元のスレ', customSigner(), 0, { now: when })];
     board = new BoardOrchestrator(pm as any, db, router as any, new CryptoEngine(), syncPow, new Identity(), null, f.history);
     await board.activate(BOARD, boardKey);
-    await waitFor(() => f.calls.length >= 3);
-    expect(f.calls).toHaveLength(3); // 同時 3 本
+    // 実網の実測で、スレの無い週が枠待ちで後ろに並び、全体で 9 秒かかっていた。全週を一度に出す
+    await waitFor(() => f.calls.length >= 13);
+    expect(f.calls).toHaveLength(13);
+    expect(f.peak()).toBe(13);
     const thisMonday = mondayOf(dayOf(Date.now()));
-    expect(f.calls.map(c => c.birthDay)).toEqual([thisMonday, thisMonday - 7, thisMonday - 14]);
+    expect(f.calls.map(c => c.birthDay)).toEqual(Array.from({ length: 13 }, (_, i) => thisMonday - 7 * i));
     expect(f.calls.every(c => c.tag === boardTag(boardKey, c.birthDay))).toBe(true);
     expect(board.getStatus().message).toMatch(/^過去ログを取得中\.\.\. \(1\/13/);
-    // 1 本終わると次が始まる。全部で 13 本
-    for (let i = 0; i < 13; i++) {
-      await waitFor(() => f.calls.length > i);
-      f.calls[i].resolve();
-    }
-    await waitFor(() => f.calls.length === 13);
-    expect(f.peak()).toBeLessThanOrEqual(3);
-    expect(f.calls.map(c => c.birthDay)).toEqual(Array.from({ length: 13 }, (_, i) => thisMonday - 7 * i));
-    const myWeek = mondayOf(dayOf(when));
-    const call = f.calls.find(c => c.birthDay === myWeek)!;
-    expect(call.since).toBe(msToMinutes(when - 5 * MINUTE_MS));
-    expect(f.calls.filter(c => c.birthDay !== myWeek).every(c => c.since === 0)).toBe(true);
+    expect(board.getStatus()).toMatchObject({ code: 'history-fetching', params: { done: 1, total: 13 } });
+    for (const c of f.calls) c.resolve();
+    // 手元のスレ立て (追いつきで届いたかもしれない) は基準にしない: 全週 since = 0
+    expect(f.calls.every(c => c.since === 0)).toBe(true);
     // 開いたとき 1 回だけ
     f.fireReady();
     expect(f.calls).toHaveLength(13);
+    await waitFor(() => !board.getStatus().message.includes('過去ログ'));
+    board.clear();
+
+    // 開き直すと、取り切った週は その時刻 − 5 分から
+    const g = fakeHistory();
+    board = new BoardOrchestrator(pm as any, db, router as any, new CryptoEngine(), syncPow, new Identity(), null, g.history);
+    await board.activate(BOARD, boardKey);
+    await waitFor(() => g.calls.length >= 1);
+    const expected = msToMinutes(Date.now()) - 5;
+    expect(Math.abs(g.calls[0].since - expected)).toBeLessThanOrEqual(2);
     void sleep;
   });
 });

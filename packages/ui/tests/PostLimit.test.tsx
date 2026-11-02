@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import React from 'react';
+import { t } from '../src/i18n';
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor } from '@testing-library/react';
 
@@ -140,7 +141,7 @@ describe('送信エラー', () => {
     fireEvent.change(replyBox(), { target: { value: 'こんにちは' } });
     fireEvent.click(sendButton());
     expect(await screen.findByRole('alert')).toBeTruthy();
-    expect(screen.getByText(/送信できませんでした/)).toBeTruthy();
+    expect(screen.getByText(t('postLimit.failed'))).toBeTruthy();
     expect(replyBox().value).toBe('こんにちは');
   });
 

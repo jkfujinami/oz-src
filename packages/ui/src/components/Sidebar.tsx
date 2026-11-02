@@ -7,8 +7,9 @@ import { useAppConfig } from '../providers/AppConfig';
 import { describeGuardStatus, type GuardTone } from '../lib/guardStatus';
 import { BrandMark } from './BrandMark';
 import type { SettingsSection } from './SettingsView';
+import { useT, type MessageKey } from '../i18n';
 
-export type MainSection = 'vault' | 'board' | 'settings' | 'about';
+export type MainSection = 'vault' | 'board' | 'settings' | 'status' | 'about';
 
 /** Guard の状態表示のクラス (警告は目立つ色にする。待ちは警告に見せない) */
 const GUARD_TONE_CLASS: Record<GuardTone, string> = {
@@ -17,11 +18,12 @@ const GUARD_TONE_CLASS: Record<GuardTone, string> = {
   pending: 'chip-pending',
 };
 
-const NAV: ReadonlyArray<{ id: MainSection; label: string; icon: string }> = [
-  { id: 'vault', label: 'ファイル共有', icon: '◈' },
-  { id: 'board', label: '掲示板', icon: '≡' },
-  { id: 'settings', label: '設定', icon: '\u2699\uFE0E' },
-  { id: 'about', label: '仕組みと安全性', icon: '?' },
+const NAV: ReadonlyArray<{ id: MainSection; label: MessageKey & `sidebar.nav.${string}`; icon: string }> = [
+  { id: 'vault', label: 'sidebar.nav.vault', icon: '◈' },
+  { id: 'board', label: 'sidebar.nav.board', icon: '≡' },
+  { id: 'settings', label: 'sidebar.nav.settings', icon: '\u2699\uFE0E' },
+  { id: 'status', label: 'sidebar.nav.status', icon: '\u25A4' },
+  { id: 'about', label: 'sidebar.nav.about', icon: '?' },
 ];
 
 /** 板 ID は長い 16 進。並べるときは先頭だけ (全体は title で見られる) */
@@ -40,6 +42,7 @@ export function Sidebar({
   section: MainSection;
   onSelect: (section: MainSection, focus?: SettingsSection) => void;
 }) {
+  const t = useT();
   const { node, identity, db, panicWipe, lock, trackerUrl, guardStatus } = useP2P();
   const { badge } = useAppConfig();
   const { route } = useRoute();
@@ -88,12 +91,12 @@ export function Sidebar({
     if (!db) return;
     const parsed = parseShareCode(importText);
     if (!parsed) {
-      setImportError('共有コードの形式が正しくありません');
+      setImportError(t('sidebar.badShare'));
       return;
     }
     // 公開板は共有コードなしで読める。公開板の ID を持つ共有コードは、公開板のすり替えを狙ったもの
     if (isPublicBoardId(parsed.boardId)) {
-      setImportError('公開板の共有コードは使えません。公開板は、サイドバーからそのまま開けます');
+      setImportError(t('sidebar.publicShare'));
       return;
     }
     await db.saveBoard(parsed.boardId, parsed.key);
@@ -120,7 +123,7 @@ export function Sidebar({
   const savedBoards = boards.filter(b => !isPublicBoardId(b.boardId));
 
   return (
-    <aside className="sidebar" aria-label="サイドバー" data-section={section}>
+    <aside className="sidebar" aria-label={t('sidebar.label')} data-section={section}>
       <a
         href="#"
         onClick={(e) => { e.preventDefault(); openBoard(DEFAULT_BOARD_ID); }}
@@ -131,7 +134,7 @@ export function Sidebar({
         <span className="badge">{badge}</span>
       </a>
 
-      <nav className="side-group side-nav" aria-label="画面の切り替え">
+      <nav className="side-group side-nav" aria-label={t('sidebar.navLabel')}>
         {NAV.map(item => (
           <button
             key={item.id}
@@ -141,13 +144,13 @@ export function Sidebar({
             onClick={() => onSelect(item.id)}
           >
             <span className="side-icon" aria-hidden="true">{item.icon}</span>
-            {item.label}
+            {t(item.label)}
           </button>
         ))}
       </nav>
 
       <div className="side-group side-boards">
-        <div className="side-label">板</div>
+        <div className="side-label">{t('sidebar.boards')}</div>
         {[...PUBLIC_BOARDS.map(b => b.id), ...savedBoards.map(b => b.boardId)].map(id => (
           <button
             key={id}
@@ -161,7 +164,7 @@ export function Sidebar({
           </button>
         ))}
         <button className="side-item side-sub side-action" onClick={handleCreatePrivateBoard} disabled={!db}>
-          + 秘密の板を作る
+          {t('sidebar.createPrivate')}
         </button>
         <button
           className="side-item side-sub side-action"
@@ -169,13 +172,13 @@ export function Sidebar({
           disabled={!db}
           aria-expanded={showImport}
         >
-          共有コードで参加
+          {t('sidebar.join')}
         </button>
         {showImport && (
           <div className="side-form stack stack-sm">
-            <div className="field-hint">相手から受け取った共有コードを貼り付けてください。鍵は暗号化された端末 DB にだけ保存します。</div>
+            <div className="field-hint">{t('sidebar.importHint')}</div>
             <input
-              aria-label="共有コード"
+              aria-label={t('sidebar.importLabel')}
               className="mono"
               placeholder="board=...&key=..."
               value={importText}
@@ -185,26 +188,30 @@ export function Sidebar({
             />
             {importError && <div role="alert" className="msg msg-error">{importError}</div>}
             <div className="row row-end">
-              <button className="btn btn-sm btn-ghost" onClick={() => { setShowImport(false); setImportError(null); }}>中止</button>
-              <button className="btn btn-sm btn-primary" onClick={handleImport} disabled={!importText.trim()}>追加</button>
+              <button className="btn btn-sm btn-ghost" onClick={() => { setShowImport(false); setImportError(null); }}>{t('sidebar.cancel')}</button>
+              <button className="btn btn-sm btn-primary" onClick={handleImport} disabled={!importText.trim()}>{t('sidebar.add')}</button>
             </div>
           </div>
         )}
       </div>
 
       <div className="side-group side-status">
-        <div className="side-label">状態</div>
-        <span className={`chip ${online ? 'chip-ok' : 'chip-pending'}`} title="直接つながっている相手の数">
+        <div className="side-label">{t('sidebar.status')}</div>
+        <button
+          className={`chip ${online ? 'chip-ok' : 'chip-pending'}`}
+          title={t('sidebar.peersTitle')}
+          onClick={() => onSelect('status')}
+        >
           <span className={`dot${online ? ' dot-live' : ''}`} style={online ? undefined : { color: 'var(--warn)' }} />
           <span>Peers: {peerCount}</span>
-        </span>
+        </button>
 
         {node && (
           <button
             className={`chip ${GUARD_TONE_CLASS[guardView.tone]}`}
             onClick={() => onSelect('settings', 'guard')}
-            title={`${guardView.headline} 設定で詳しく見られます。`}
-            aria-label={`匿名経路の状態: ${guardView.label}`}
+            title={t('sidebar.guardTitle', { headline: guardView.headline })}
+            aria-label={t('sidebar.guardLabel', { label: guardView.label })}
           >
             <span className="dot" />
             {guardView.label}
@@ -215,25 +222,25 @@ export function Sidebar({
           className={`chip${trackerMissing ? ' chip-warn' : ''}`}
           onClick={() => onSelect('settings', 'connection')}
           disabled={!node}
-          title={trackerUrl ? 'トラッカーの設定' : 'トラッカーが未設定です'}
+          title={trackerUrl ? t('sidebar.trackerSettings') : t('sidebar.trackerUnset')}
         >
           <span className="dot" style={{ color: trackerMissing ? 'var(--warn)' : trackerUrl ? 'var(--ok)' : 'var(--text-3)' }} />
-          {trackerMissing ? 'トラッカー未設定' : 'トラッカー'}
+          {trackerMissing ? t('sidebar.trackerMissing') : t('sidebar.tracker')}
         </button>
 
         {identity && (
           <span className="chip" style={{ fontFamily: 'var(--mono)' }}>
             <span className="muted">Trip</span>
-            <span className="author-trip">{identity.tripDisplay || '名無し'}</span>
+            <span className="author-trip">{identity.tripDisplay || t('sidebar.anonymous')}</span>
           </span>
         )}
         {identity?.hasTrip && (
           <span
             role="note"
-            title="トリップを付けた投稿同士は、同じ人物のものとして紐付きます。継続して投稿すると、オンラインだった時間帯との突き合わせで候補を絞られる材料にもなります。"
+            title={t('sidebar.tripNote')}
             className="xsmall text-warn"
           >
-            ⚠ 投稿同士が紐付きます
+            {t('sidebar.tripLinked')}
           </span>
         )}
       </div>
@@ -242,16 +249,16 @@ export function Sidebar({
         <button
           className="btn btn-sm"
           onClick={() => { void lock(); }}
-          title="通信を止め、パスワード画面に戻ります (データは消えません)"
+          title={t('sidebar.lockTitle')}
         >
-          ロック
+          {t('sidebar.lock')}
         </button>
         <button
           className={`btn btn-sm btn-danger${confirmWipe ? ' is-armed' : ''}`}
           onClick={handlePanicWipe}
-          title="通信を止め、この端末のデータをすべて読めなくしてから消去します (元に戻せません)"
+          title={t('sidebar.wipeTitle')}
         >
-          {confirmWipe ? 'もう一度押すと全消去' : '緊急消去'}
+          {confirmWipe ? t('sidebar.wipeAgain') : t('sidebar.wipe')}
         </button>
       </div>
     </aside>

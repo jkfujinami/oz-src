@@ -139,6 +139,7 @@ describe('ThreadOrchestrator', () => {
       await h.thread.submitReply('届かない');
       await waitFor(() => h.thread.getStatus().phase === 'error');
       expect(h.thread.getStatus().message).toContain('平文での送信は行っていません');
+      expect(h.thread.getStatus().code).toBe('no-anonymous-route');
     });
 
     it('投稿後の表示は 3 秒で通常に戻る', async () => {
@@ -147,7 +148,7 @@ describe('ThreadOrchestrator', () => {
       expect(h.thread.getStatus()).toMatchObject({ phase: 'idle', isSubmitting: false });
       expect(h.thread.getStatus().message).not.toBe('');
       await vi.advanceTimersByTimeAsync(3000);
-      expect(h.thread.getStatus()).toMatchObject({ phase: 'idle', message: '' });
+      expect(h.thread.getStatus()).toMatchObject({ phase: 'idle', code: 'none', message: '' });
     });
 
     it('空文字の返信は何もしない', async () => {
@@ -193,6 +194,21 @@ describe('ThreadOrchestrator', () => {
     it('板の鍵で暗号化された板メタは、スレッドには現れない', async () => {
       await h.router.deliver(await buildThreadMetaPacket(boardKey, BOARD, THREAD, 'スレタイ', customSigner()));
       expect(h.thread.getPosts()).toHaveLength(0);
+    });
+
+    it('同じタスクの中でまとめて届いた投稿 (過去ログの 1 回の応答) は、解析と通知を 1 回にまとめる。保存と touchThread は全件ぶん', async () => {
+      const pkts = [];
+      for (let i = 0; i < 12; i++) pkts.push(await buildReplyPacket(threadKey, BOARD, THREAD, `まとめて${i}`, customSigner()));
+      const notified = vi.fn();
+      h.thread.subscribe(notified);
+      const touch = vi.spyOn(h.db, 'touchThread');
+      // HistoryClient.ingest と同じく、1 つの同期ループで配る
+      await Promise.all(pkts.map(p => h.router.deliver(p)));
+      expect(notified).toHaveBeenCalledTimes(1);
+      expect(contents(h).sort()).toEqual(pkts.map((_, i) => `まとめて${i}`).sort());
+      expect(await h.db.getPosts(BOARD, THREAD)).toHaveLength(12);
+      expect(touch).toHaveBeenCalledTimes(1);
+      expect(touch).toHaveBeenLastCalledWith(BOARD, THREAD, h.thread.getThreadState().lastPostAt);
     });
 
     it('同じパケットが何度届いても通知は 1 回', async () => {
@@ -410,6 +426,7 @@ describe('ThreadOrchestrator', () => {
       const p = h.thread.activate(BOARD, THREAD, boardKey).then(() => { done = true; });
       await waitFor(() => h.thread.getStatus().message === '隣人を探しています...');
       expect(h.thread.getStatus().phase).toBe('loading');
+      expect(h.thread.getStatus().code).toBe('finding-neighbors');
 
       await vi.advanceTimersByTimeAsync(9_999);
       expect(done).toBe(false);
@@ -417,6 +434,7 @@ describe('ThreadOrchestrator', () => {
       await p;
       expect(h.thread.getStatus()).toMatchObject({ phase: 'idle' });
       expect(h.thread.getStatus().message).toContain('ネット接続待機中');
+      expect(h.thread.getStatus().code).toBe('waiting-network');
     });
 
     it('待っている間に隣人が来れば即座に同期へ進み、8 秒の猶予の後で「1 件も無い」と出す', async () => {
@@ -432,6 +450,7 @@ describe('ThreadOrchestrator', () => {
 
       await vi.advanceTimersByTimeAsync(8000);
       expect(h.thread.getStatus().message).toContain('レスが1件もありませんでした');
+      expect(h.thread.getStatus().code).toBe('thread-empty');
     });
 
     it('追いつきの受信中は「1 件も無い」と言わず、終わってから猶予を過ぎていれば言う', async () => {
@@ -439,7 +458,7 @@ describe('ThreadOrchestrator', () => {
       h.catchup.active = true;
       await h.thread.activate(BOARD, THREAD, boardKey);
       await vi.advanceTimersByTimeAsync(20_000);
-      expect(h.thread.getStatus()).toMatchObject({ phase: 'syncing', message: '過去ログを取得中...' });
+      expect(h.thread.getStatus()).toMatchObject({ phase: 'syncing', code: 'history-fetching', message: '過去ログを取得中...' });
       h.catchup.set(false);
       expect(h.thread.getStatus().message).toContain('レスが1件もありませんでした');
     });

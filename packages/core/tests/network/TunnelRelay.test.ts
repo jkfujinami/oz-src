@@ -434,21 +434,43 @@ describe('TunnelRelay: 相手ごとの制限 (要求数・同時数・帯域・�
     expect(g2.relay!.downstreamCount).toBe(limit);
   });
 
-  it('★バックボーンの相手 (信頼 Guard) には広い枠: G1 → G2 の同時数は 6 を超えて通る。バックボーンでない相手が同じことをすると BUSY', () => {
+  it('★バックボーンの相手 (信頼 Guard) には広い枠: G1 → G2 の同時数は 32 を超えて通る。バックボーンでない相手が同じことをすると、利用者と同じ同時 32 本で BUSY', () => {
     const { r, h } = chain({ g: { limits: { peer: { reqPerSec: 1000, reqBurst: 1000 } } } });
-    // 利用者の枠 (6) を超える数を、別々の利用者から G1 に頼む → G1 → G2 は 1 本の接続に束ねられる
-    const clients = Array.from({ length: 12 }, (_, i) => node(pid(0xa000 + i)));
+    // 普通の相手の同時数 (32) を超える数を、別々の利用者から G1 に頼む → G1 → G2 は 1 本の接続に束ねられる
+    const clients = Array.from({ length: 40 }, (_, i) => node(pid(0xa000 + i)));
     clients.forEach(c => c.link(bus.nodes.get(G1)!));
     clients.forEach((c, i) => c.send(G1, WireType.TUNNEL_SEND, { reqId: i + 1, gateway: G2, tunnelId: TID, body: body() }));
     bus.flush();
-    expect(h.got(WireType.TUNNEL_DELIVER)).toHaveLength(12);
+    expect(h.got(WireType.TUNNEL_DELIVER)).toHaveLength(40);
     // 同じことを、バックボーンではない相手が G2 の受け口へ直接 FWD で頼む
     const stranger = node(pid(0xe001));
     stranger.link(bus.nodes.get(G2)!);
-    for (let i = 0; i < 12; i++) stranger.send(G2, WireType.TUNNEL_FWD, { returnTag: 1000 + i, tunnelId: TID, body: body() });
+    for (let i = 0; i < 40; i++) stranger.send(G2, WireType.TUNNEL_FWD, { returnTag: 1000 + i, tunnelId: TID, body: body() });
     bus.flush();
-    expect(stranger.got(WireType.TUNNEL_ERROR).filter(m => m.payload.code === TUNNEL_ERROR_CODE.BUSY).length).toBeGreaterThanOrEqual(6);
+    expect(stranger.got(WireType.TUNNEL_ERROR).filter(m => m.payload.code === TUNNEL_ERROR_CODE.BUSY)).toHaveLength(40 - TUNNEL_LIMITS.PEER.concurrent);
     void r;
+  });
+
+  it('★普通の相手からの転送の枠は、利用者の上り枠 (CLIENT_SEND) と同じ件数・同時数 (直接 TUNNEL_SEND すれば同じ枠を使えるので、狭くしても守りにならない)', () => {
+    expect(TUNNEL_LIMITS.PEER.reqPerSec).toBe(TUNNEL_LIMITS.CLIENT_SEND.reqPerSec);
+    expect(TUNNEL_LIMITS.PEER.reqBurst).toBe(TUNNEL_LIMITS.CLIENT_SEND.reqBurst);
+    expect(TUNNEL_LIMITS.PEER.concurrent).toBe(TUNNEL_LIMITS.CLIENT_SEND.concurrent);
+  });
+
+  it('setRole: 一般のノードも Guard の大きさの表に切り替えられ、戻せる (信頼 Guard を使えていない間の受け持ち)', () => {
+    const relay = new TunnelRelay(new FakeNetworkPeerManager(pid(0x77)), newDispatcher(), { role: 'client' });
+    expect(relay.currentRole).toBe('client');
+    expect((relay as any).cfg).toMatchObject({ maxRoutes: TUNNEL_LIMITS.MAX_ROUTES.client, maxTunnels: TUNNEL_LIMITS.MAX_TUNNELS.client });
+    relay.setRole('guard');
+    expect((relay as any).cfg).toMatchObject({ maxRoutes: TUNNEL_LIMITS.MAX_ROUTES.guard, maxTunnels: TUNNEL_LIMITS.MAX_TUNNELS.guard });
+    relay.setRole('client');
+    expect((relay as any).cfg).toMatchObject({ maxRoutes: TUNNEL_LIMITS.MAX_ROUTES.client, maxTunnels: TUNNEL_LIMITS.MAX_TUNNELS.client });
+    // テストが指定した経路の上限は、役を替えても上書きしない
+    const fixed = new TunnelRelay(new FakeNetworkPeerManager(pid(0x78)), newDispatcher(), { limits: { maxRoutes: 5 } });
+    fixed.setRole('guard');
+    expect((fixed as any).cfg.maxRoutes).toBe(5);
+    relay.destroy();
+    fixed.destroy();
   });
 
   it('★帯域: 利用者から受け取る本体のバイト数に枠 (C4: 1MiB/秒・バースト 64MiB)。使い切ると捨てる', () => {

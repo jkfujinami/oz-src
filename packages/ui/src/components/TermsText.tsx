@@ -1,11 +1,13 @@
-import { TERMS_ARTICLES, TERMS_PREAMBLE, termsDateLabel } from '../lib/terms';
+import { useLocale } from '../i18n';
+import { termsArticles, termsPreamble, termsDateLabel } from '../lib/terms';
 
 /** 利用規約の本文 (同意画面と「仕組みと安全性」で使う) */
 export function TermsText() {
+  useLocale();
   return (
     <div className="prose terms">
-      <p>{TERMS_PREAMBLE}</p>
-      {TERMS_ARTICLES.map((a) => (
+      <p>{termsPreamble()}</p>
+      {termsArticles().map((a) => (
         <section key={a.heading}>
           <h3 className="terms-heading">{a.heading}</h3>
           {a.paragraphs.length > 1 ? (

@@ -5,6 +5,8 @@ type Command = 'lock' | 'panic-wipe';
 contextBridge.exposeInMainWorld('electronAPI', {
   platform: process.platform,
   isElectron: true,
+  /** Ozzy はロッカーへ main から直接つなぐ (ozlocker://。Worker を使わない) */
+  ozzyDirect: true,
   /**
    * トレイからの操作 (ロック / 緊急消去) を受け取る。解除関数を返す。
    * 受け付けるのは決まった 2 種類だけ (それ以外の文字列は捨てる)。

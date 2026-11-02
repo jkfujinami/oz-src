@@ -137,6 +137,25 @@ describe('PeerManager: Guard のバックボーン', () => {
     expect(GUARD_MAX_DEGREE).toBeGreaterThan(RING_MESH.MAX_DEGREE);
   });
 
+  it('setMaxDegree: 上限を上げれば多く受け入れ、下げれば超えた分を外す (信頼 Guard は外さない)', () => {
+    make();
+    expect(pm.maxDegree).toBe(RING_MESH.MAX_DEGREE);
+    const g = hex(0xb9);
+    pm.setGuardSource({ wantedGuardIds: () => [], isTrusted: (id) => id === g });
+    pm.setMaxDegree(64);
+    expect(pm.maxDegree).toBe(64);
+    putPeer(fakePeer(g, { position: (identity.position + 0.5) % 1, verifiedAt: 9e9 }));
+    for (let i = 1; i <= 40; i++) putPeer(fakePeer(hex(i), { position: (identity.position + 0.0001 * i) % 1, verifiedAt: 1_000 + i }));
+    pm.rebalance();
+    expect(pm.verifiedPeers.length).toBe(41); // 64 以内なので誰も外さない
+    pm.setMaxDegree(RING_MESH.MAX_DEGREE);
+    expect(pm.verifiedPeers.length).toBe(RING_MESH.MAX_DEGREE);
+    expect(pm.peers.has(g)).toBe(true);
+    // 不正な値は無視する
+    pm.setMaxDegree(0);
+    expect(pm.maxDegree).toBe(RING_MESH.MAX_DEGREE);
+  });
+
   it('★予約枠: バックボーンの数だけ、握手待ちの別枠が増える (一般枠が満杯でも Guard へ張れる)', () => {
     make({ keepTrackerAttached: true, maxDegree: GUARD_MAX_DEGREE });
     const ids = Array.from({ length: 10 }, (_, i) => hex(0xc0 + i));

@@ -131,7 +131,21 @@ export function createLocalTrackerService(): LocalTrackerService {
   const start = async (port: number, advertiseHost?: string | null): Promise<{ trackerString: string; port: number }> => {
     await stop();
     const nextHub = new EdgeTrackerHub();
-    const nextServer = http.createServer((_req, res) => {
+    const nextServer = http.createServer((req, res) => {
+      const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+      if (url.pathname === '/health' || url.pathname === '/ozzy/v2/tracker-status') {
+        res.writeHead(200, { 'content-type': 'application/json', 'access-control-allow-origin': '*' });
+        res.end(
+          JSON.stringify({
+            ok: true,
+            runtime: 'local-tracker',
+            protocolVersion: 3,
+            activeSessions: nextHub.sessionCount,
+            connections: nextHub.connectionCount,
+          }),
+        );
+        return;
+      }
       res.writeHead(200, { 'content-type': 'text/plain' });
       res.end('ok');
     });

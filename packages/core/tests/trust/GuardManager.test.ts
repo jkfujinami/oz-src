@@ -338,6 +338,46 @@ describe('GuardManager: Guard サンプル (最大 3 人・各 30〜60 日)', ()
     for (const e of sample) expect(ids.slice(0, 3).map(i => i.peerId)).toContain(e.peerId);
   });
 
+  it('withoutTrustedGuard: オープン・fallback の間だけ true。信頼 Guard を使っている・リストの Guard を待っている猶予の間は false', async () => {
+    const peers = new Map<string, any>();
+    const cands = Array.from({ length: 5 }, (_, i) => {
+      const peerId = (i + 1).toString(16).repeat(32);
+      peers.set(peerId, { peerId, direction: 'outbound' });
+      return { peerId, pubkey: new Uint8Array(32) };
+    });
+    // オープン (リスト無し): 選ぶ前から true
+    const open = new GuardManager({ store: new MemoryStore(), powParams: FAST, now: () => NOW });
+    await open.init();
+    expect(open.withoutTrustedGuard).toBe(true);
+    open.select(cands, peers, NOW, null);
+    expect(open.status).toMatchObject({ mode: 'none', reason: 'waiting-for-candidates' });
+    expect(open.withoutTrustedGuard).toBe(true); // 普通の隣人を選ぶ条件を待っている間も
+    open.select(cands, peers, NOW + 60_000, null);
+    expect(open.status.mode).toBe('open');
+    expect(open.withoutTrustedGuard).toBe(true);
+
+    // リストあり: 起動直後・猶予の間は false (行ったり来たりしない)
+    const clock = { t: NOW };
+    const gm = new GuardManager({ keyset: m.keyset, store: new MemoryStore(), powParams: FAST, now: () => clock.t });
+    await gm.init();
+    await gm.importList(makeList(m, ids.slice(0, 3)));
+    expect(gm.withoutTrustedGuard).toBe(false);
+    gm.select(cands, peers, clock.t, null);
+    expect(gm.status).toMatchObject({ mode: 'none', reason: 'waiting-for-trusted-guard' });
+    expect(gm.withoutTrustedGuard).toBe(false);
+    // 猶予を過ぎても信頼 Guard に届かない: fallback → true
+    clock.t += 60_000;
+    const fbPick = gm.select(cands, peers, clock.t, null);
+    expect(gm.status.mode).toBe('fallback');
+    expect(gm.withoutTrustedGuard).toBe(true);
+    // 信頼 Guard につながった: false に戻る
+    const trusted = { peerId: ids[0].peerId, pubkey: ids[0].exportSecret().pubkey };
+    peers.set(trusted.peerId, { peerId: trusted.peerId, direction: 'outbound' });
+    gm.select([...cands, trusted], peers, clock.t + 1000, fbPick!.peerId);
+    expect(gm.status.mode).toBe('trusted');
+    expect(gm.withoutTrustedGuard).toBe(false);
+  });
+
   it('保存先が壊れていても落ちない (読めない・書けない)', async () => {
     const broken = {
       get: async () => { throw new Error('boom'); },

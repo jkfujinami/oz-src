@@ -46,6 +46,10 @@ if (typeof globalThis.localStorage === 'undefined') {
   });
 }
 
+// 画面の言語はテストでは日本語に固定する (jsdom・Node は OS の言語を en-US と報告するので、そのままだと英語が選ばれる)。
+// 言語は i18n の読み込み時に決まるので、ここで先に置く
+try { globalThis.localStorage.setItem('oz.locale', 'ja'); } catch { /* 無ければ既定 (ja) */ }
+
 if (typeof globalThis.btoa === 'undefined') {
   globalThis.btoa = (s: string) => Buffer.from(s, 'binary').toString('base64');
 }

@@ -33,8 +33,9 @@ afterEach(() => {
 });
 
 describe('公開板', () => {
-  it('公開板は「雑談」と「ファイル共有スレッド」の 2 つで、起動時は雑談を開く。vip はもう無い', () => {
-    expect(PUBLIC_BOARDS.map(b => b.name)).toEqual(['雑談', 'ファイル共有スレッド']);
+  it('公開板は「雑談」「ファイル共有スレッド」「開発」の 3 つで、起動時は雑談を開く。vip はもう無い', () => {
+    expect(PUBLIC_BOARDS.map(b => b.name)).toEqual(['雑談', 'ファイル共有スレッド', '開発']);
+    expect(boardDisplayName('dev')).toBe('開発');
     expect(DEFAULT_BOARD_ID).toBe('zatsudan');
     expect(getRoute()).toEqual({ board: 'zatsudan' });
     expect(isPublicBoardId('vip')).toBe(false);

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { copySecret } from '../lib/clipboard';
+import { tRich, useT } from '../i18n';
 import { desktopGuardApi, type DesktopGuardStatus } from '../lib/desktopGuard';
 
 const SLOT_CHOICES = [1, 2, 4, 8, 16, 32];
@@ -11,6 +12,7 @@ const SLOT_CHOICES = [1, 2, 4, 8, 16, 32];
  * ★ 表示するのは Guard 自身の peerId・Guard 文字列・件数だけ (つながっている利用者の peerId や IP は出さない)。
  */
 export function DesktopGuardSettings() {
+  const t = useT();
   const api = desktopGuardApi();
   const [status, setStatus] = useState<DesktopGuardStatus | null>(null);
   const [slots, setSlots] = useState<number>(4);
@@ -33,7 +35,7 @@ export function DesktopGuardSettings() {
   }, [api]);
 
   if (!api) return null;
-  if (!status) return <div className="msg msg-info">読み込んでいます...</div>;
+  if (!status) return <div className="msg msg-info">{t('hostGuard.loading')}</div>;
 
   const run = async (fn: () => Promise<DesktopGuardStatus | null>) => {
     setBusy(true);
@@ -75,13 +77,12 @@ export function DesktopGuardSettings() {
   };
 
   const r = status.report;
-  const state = status.running ? '動いています' : status.starting ? '起動しています...' : status.enabled ? '止まっています' : '使っていません';
+  const state = status.running ? t('hostGuard.stateRunning') : status.starting ? t('hostGuard.stateStarting') : status.enabled ? t('hostGuard.stateStopped') : t('hostGuard.stateOff');
 
   return (
     <div className="stack">
       <p className="panel-desc">
-        この端末を、他の利用者の 1 ホップ目 (信頼 Guard) として動かします。画面のノードとは別の身元で、画面をロックしても動き続けます。
-        <strong> Guard にはつながってきた利用者の IP が見え、この端末の IP は Guard として利用者に見えます。</strong>
+        {tRich('hostGuard.intro', { strong: (c) => <strong>{c}</strong> })}
       </p>
 
       {!status.available ? (
@@ -92,7 +93,7 @@ export function DesktopGuardSettings() {
             <span className={`badge ${status.running ? 'badge-ok' : status.error ? 'badge-warn' : 'badge-neutral'}`}>{state}</span>
             {r && (
               <span className="xsmall muted">
-                接続 {r.counts.degree} (利用者 {r.counts.clients} / 他の Guard {r.counts.backbone})・トンネル {r.counts.tunnels} 本
+                {t('hostGuard.counts', { degree: r.counts.degree, clients: r.counts.clients, backbone: r.counts.backbone, tunnels: r.counts.tunnels })}
               </span>
             )}
           </div>
@@ -101,42 +102,42 @@ export function DesktopGuardSettings() {
 
           {!status.enabled ? (
             <div className="row row-wrap" style={{ gap: 8, alignItems: 'center' }}>
-              <label className="field-label" htmlFor="guard-slots">預かる枠</label>
+              <label className="field-label" htmlFor="guard-slots">{t('hostGuard.slots')}</label>
               <select id="guard-slots" value={slots} onChange={(e) => setSlots(Number(e.target.value))} style={{ width: 'auto' }}>
-                {SLOT_CHOICES.map((n) => <option key={n} value={n}>{n} 枠 ({n * 256} MiB)</option>)}
+                {SLOT_CHOICES.map((n) => <option key={n} value={n}>{t('hostGuard.slotOption', { n, size: n * 256 })}</option>)}
               </select>
-              <label className="field-label" htmlFor="guard-tracker-port">トラッカー開放ポート (任意)</label>
+              <label className="field-label" htmlFor="guard-tracker-port">{t('hostGuard.trackerPortLabel')}</label>
               <input
                 id="guard-tracker-port"
                 type="number"
                 min={1}
                 max={65535}
-                placeholder="例: 8787"
+                placeholder={t('hostGuard.trackerPortPlaceholder')}
                 value={trackerPortInput}
                 onChange={(e) => setTrackerPortInput(e.target.value)}
                 style={{ width: 110 }}
               />
               <button className="btn btn-primary" disabled={busy} onClick={handleEnable}>
-                Guard として動かす
+                {t('hostGuard.enable')}
               </button>
             </div>
           ) : (
             <div className="row row-wrap" style={{ gap: 8 }}>
-              <button className="btn" disabled={busy} onClick={() => void run(() => api.disable())}>Guard を止める</button>
+              <button className="btn" disabled={busy} onClick={() => void run(() => api.disable())}>{t('hostGuard.disable')}</button>
             </div>
           )}
 
           {status.trackerString && (
             <div className="subpanel stack stack-sm">
-              <div className="subpanel-title">ポート開放トラッカー (ポート {status.trackerPort})</div>
+              <div className="subpanel-title">{t('hostGuard.trackerTitle', { port: status.trackerPort ?? '' })}</div>
               <div className="small">
-                この文字列をトラッカー設定に入力すると、IP アドレスとポート番号を直接晒さずにこの端末のトラッカーへ接続できます。
+                {t('hostGuard.trackerDesc')}
               </div>
               <div className="field">
                 <div className="row row-between row-wrap" style={{ gap: 8 }}>
-                  <span className="field-label">トラッカー文字列</span>
+                  <span className="field-label">{t('hostGuard.trackerString')}</span>
                   <button className="btn btn-sm btn-ghost" onClick={() => void copyTrackerString()}>
-                    {copiedTracker ? 'コピーしました' : 'コピー'}
+                    {copiedTracker ? t('hostGuard.copied') : t('hostGuard.copy')}
                   </button>
                 </div>
                 <code className="code-block">{status.trackerString}</code>
@@ -153,25 +154,25 @@ export function DesktopGuardSettings() {
               onChange={(e) => void run(() => api.setOpenAtLogin(e.target.checked))}
             />
             <span>
-              <strong>ログイン時に起動する</strong>
-              <span className="muted"> (画面は出さず、トレイと Guard だけで動きます)</span>
+              <strong>{t('hostGuard.openAtLogin')}</strong>
+              <span className="muted">{t('hostGuard.openAtLoginNote')}</span>
             </span>
           </label>
 
           {r && (
             <div className="subpanel stack stack-sm">
-              <div className="subpanel-title">信頼リスト</div>
+              <div className="subpanel-title">{t('hostGuard.listTitle')}</div>
               <div className="small">
                 {r.listed
-                  ? `この Guard は信頼リスト (v${r.listVersion ?? '?'}) に載っています。`
+                  ? t('hostGuard.listed', { version: r.listVersion ?? '?' })
                   : r.hasList
-                    ? `信頼リスト (v${r.listVersion ?? '?'}) にはまだ載っていません。下の Guard 文字列をメンテナに渡してください。`
-                    : 'このアプリには信頼リストがありません。下の Guard 文字列をメンテナに渡してください。'}
+                    ? t('hostGuard.notListed', { version: r.listVersion ?? '?' })
+                    : t('hostGuard.noList')}
               </div>
               <div className="field">
                 <div className="row row-between row-wrap" style={{ gap: 8 }}>
-                  <span className="field-label">Guard 文字列</span>
-                  <button className="btn btn-sm btn-ghost" onClick={() => void copyGuardString()}>{copied ? 'コピーしました' : 'コピー'}</button>
+                  <span className="field-label">{t('hostGuard.guardString')}</span>
+                  <button className="btn btn-sm btn-ghost" onClick={() => void copyGuardString()}>{copied ? t('hostGuard.copied') : t('hostGuard.copy')}</button>
                 </div>
                 <code className="code-block">{r.guardString}</code>
               </div>

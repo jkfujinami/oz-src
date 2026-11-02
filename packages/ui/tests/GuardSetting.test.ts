@@ -76,7 +76,8 @@ describe('Guard の状態の文言', () => {
       describeGuardStatus({ ...base, mode: 'open' }),
     ]) {
       expect(view.details.join('\n')).toMatch(/普通の隣人/);
-      expect(view.details.join('\n')).toMatch(/弱く/);
+      // 匿名性が弱い (低下している) ことを必ず伝える
+      expect(view.details.join('\n')).toMatch(/匿名性が(弱|低下)/);
     }
   });
 

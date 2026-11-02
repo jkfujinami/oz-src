@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { useP2P } from '../providers/P2PProvider';
+import { getLocale, useT } from '../i18n';
 import { describeGuardStatus, importFailureText } from '../lib/guardStatus';
 
 function formatTime(ms: number): string {
-  return new Date(ms).toLocaleString('ja-JP', { dateStyle: 'medium', timeStyle: 'short' });
+  return new Date(ms).toLocaleString(getLocale(), { dateStyle: 'medium', timeStyle: 'short' });
 }
 
 type ImportMessage =
@@ -17,6 +18,7 @@ type ImportMessage =
  *   示すので、画面にも書かない (スクリーンショットや画面共有で漏れるため)。
  */
 export function GuardPanel({ onClose }: { onClose?: () => void }) {
+  const t = useT();
   const { guardStatus, guardTrustConfigured, importGuardList } = useP2P();
   const view = describeGuardStatus(guardStatus);
   const [text, setText] = useState('');
@@ -29,14 +31,14 @@ export function GuardPanel({ onClose }: { onClose?: () => void }) {
     try {
       const result = await importGuardList(text);
       if (result.ok) {
-        setMessage({ kind: 'ok', text: `取り込みました (版 ${result.version}・期限 ${formatTime(result.expiresAt)})` });
+        setMessage({ kind: 'ok', text: t('guardPanel.imported', { version: result.version, time: formatTime(result.expiresAt) }) });
         setText('');
       } else {
         setMessage({ kind: 'error', text: importFailureText(result.reason) });
       }
     } catch {
       // 停止中のノードへの取り込みは例外になる
-      setMessage({ kind: 'error', text: 'リストを取り込めませんでした (ノードが停止しています)' });
+      setMessage({ kind: 'error', text: t('guardPanel.stopped') });
     } finally {
       setBusy(false);
     }
@@ -46,7 +48,7 @@ export function GuardPanel({ onClose }: { onClose?: () => void }) {
 
   return (
     <div style={{ fontSize: '12px', lineHeight: 1.6 }}>
-      <div style={{ fontWeight: 700, marginBottom: '4px' }}>匿名経路の状態</div>
+      <div style={{ fontWeight: 700, marginBottom: '4px' }}>{t('guardPanel.title')}</div>
       <div style={{ color: view.tone === 'warn' ? 'var(--warn)' : 'var(--text-dim)', fontWeight: view.tone === 'warn' ? 700 : 400 }}>
         {view.headline}
       </div>
@@ -56,20 +58,20 @@ export function GuardPanel({ onClose }: { onClose?: () => void }) {
 
       {guardStatus.listVersion !== null && (
         <div style={{ marginTop: '6px' }}>
-          信頼リスト: 版 {guardStatus.listVersion}
-          {guardStatus.listExpiresAt !== null && <>・期限 {formatTime(guardStatus.listExpiresAt)}</>}
+          {t('guardPanel.listVersion', { version: guardStatus.listVersion })}
+          {guardStatus.listExpiresAt !== null && <>{t('guardPanel.listExpires', { time: formatTime(guardStatus.listExpiresAt) })}</>}
         </div>
       )}
 
       {guardTrustConfigured ? (
         <div style={{ marginTop: '10px' }}>
-          <div style={{ fontWeight: 700 }}>信頼リストの取り込み</div>
+          <div style={{ fontWeight: 700 }}>{t('guardPanel.importTitle')}</div>
           <div style={{ color: 'var(--text-dim)', marginBottom: '6px' }}>
-            メンテナが署名した Guard リストの文字列を貼り付けてください。署名と期限を確認してから保存します。
+            {t('guardPanel.importDesc')}
           </div>
           <div className="input-group">
             <textarea
-              aria-label="信頼リストの文字列"
+              aria-label={t('guardPanel.textLabel')}
               placeholder="oz-guards:..."
               value={text}
               spellCheck={false}
@@ -80,7 +82,7 @@ export function GuardPanel({ onClose }: { onClose?: () => void }) {
             />
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', marginTop: '8px' }}>
               <button className="btn" disabled={busy || !text.trim()} onClick={() => void handleImport()}>
-                取り込む
+                {t('guardPanel.import')}
               </button>
             </div>
             {message && (
@@ -95,13 +97,13 @@ export function GuardPanel({ onClose }: { onClose?: () => void }) {
         </div>
       ) : (
         <div style={{ marginTop: '10px', color: 'var(--text-dim)' }}>
-          この版のアプリには信頼リストの公開鍵が組み込まれていないため、リストは取り込めません。
+          {t('guardPanel.noKey')}
         </div>
       )}
 
       {onClose && (
         <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '10px' }}>
-          <button className="btn" onClick={onClose}>閉じる</button>
+          <button className="btn" onClick={onClose}>{t('guardPanel.close')}</button>
         </div>
       )}
     </div>

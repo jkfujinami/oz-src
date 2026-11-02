@@ -1,15 +1,20 @@
 "use client";
 
-import { useEffect, useState, useCallback, useSyncExternalStore } from 'react';
+import { useEffect, useCallback, useSyncExternalStore } from 'react';
 import { useP2P } from '../providers/P2PProvider';
-import { ThreadRanker, type ThreadMeta, type BoardStatus, createLogger } from '@oz/core';
-import { resolveBoardKey, shareCode } from '../lib/boardKeys';
+import { type ThreadMeta, type BoardStatus, createLogger } from '@oz/core';
+import { shareCode } from '../lib/boardKeys';
+import { useBoardKey } from './useBoardKey';
+import type { BoardSort } from '../lib/boardSort';
+import { sortThreads } from '../lib/threadOrder';
 import { navigate } from '../lib/route';
+import { describeCoreStatus } from '../lib/coreStatus';
+import { t, useLocale } from '../i18n';
 
 const log = createLogger('ui.board');
 
 const EMPTY_THREADS: ThreadMeta[] = [];
-const IDLE_STATUS: BoardStatus = { phase: 'idle', message: '初期化中...', isSubmitting: false, powProgress: 0 };
+const IDLE_STATUS: BoardStatus = { phase: 'idle', code: 'initializing', message: '', isSubmitting: false, powProgress: 0 };
 
 /**
  * useBoard
@@ -27,10 +32,11 @@ const IDLE_STATUS: BoardStatus = { phase: 'idle', message: '初期化中...', is
  * 構造的に消える。代わりに getSnapshot は「変わらない限り同じ参照」を返す
  * 必要があり、その責任は BoardOrchestrator 側のキャッシュが負っている。
  */
-export function useBoard(boardId: string) {
+export function useBoard(boardId: string, sort: BoardSort = 'heat') {
+  useLocale(); // 言語が変わったら状態の文も作り直す
   const { boardOrchestrator, isReady, db } = useP2P();
 
-  const [boardKey, setBoardKey] = useState<Uint8Array | null>(null);
+  const boardKey = useBoardKey(boardId, db);
 
   const subscribeThreads = useCallback(
     (onChange: () => void) => {
@@ -65,16 +71,6 @@ export function useBoard(boardId: string) {
   const threads = useSyncExternalStore(subscribeThreads, getThreads, () => EMPTY_THREADS);
   const status = useSyncExternalStore(subscribeStatus, getStatus, () => IDLE_STATUS);
 
-  // 板の鍵の解決。鍵は URL ではなく、暗号化された端末 DB から引く。
-  useEffect(() => {
-    let cancelled = false;
-    setBoardKey(null);
-    resolveBoardKey(boardId, db).then((key) => {
-      if (!cancelled) setBoardKey(key);
-    });
-    return () => { cancelled = true; };
-  }, [boardId, db]);
-
   // 板の活性化。アンマウント時に購読を畳む。
   useEffect(() => {
     if (!isReady || !boardOrchestrator || !boardKey) return;
@@ -93,19 +89,16 @@ export function useBoard(boardId: string) {
       // ★ 経路は URL に出さない (閲覧履歴に残るため)
       navigate({ board: boardId, thread: threadId });
     } else if (onFail) {
-      onFail('スレッドの作成に失敗しました');
+      onFail(t('core.board.createFailed'));
     }
   };
 
-  const sortedThreads = [...threads].sort((a, b) => {
-    const scoreA = ThreadRanker.calculateScore(a.max_pow || 0, a.created_at);
-    const scoreB = ThreadRanker.calculateScore(b.max_pow || 0, b.created_at);
-    return scoreB - scoreA;
-  });
+  const sortedThreads = sortThreads(threads, sort);
 
   return {
     threads: sortedThreads,
-    status: status.message,
+    status: describeCoreStatus(status),
+    phase: status.phase,
     isSubmitting: status.isSubmitting ?? false,
     powProgress: status.powProgress ?? 0,
     submitThread,

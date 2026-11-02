@@ -1,4 +1,5 @@
 import type { GuardStatus, GuardListResult } from '@oz/core';
+import { t } from '../i18n';
 
 /**
  * Guard (1 ホップ目) の状態を、画面に出す文言に変える。
@@ -27,32 +28,32 @@ export function describeGuardStatus(status: GuardStatus): GuardView {
     case 'trusted':
       return {
         tone: 'calm',
-        label: '信頼 Guard 経由',
-        headline: '信頼 Guard 経由で接続しています。',
+        label: t('guard.trusted.label'),
+        headline: t('guard.trusted.headline'),
         details: [
-          '最初の中継は、メンテナが審査したリストに載っている Guard です。',
+          t('guard.trusted.detail1'),
         ],
       };
 
     case 'fallback':
       return {
         tone: 'warn',
-        label: '警告: 信頼 Guard に未接続',
-        headline: '信頼 Guard に接続できていません。',
+        label: t('guard.fallback.label'),
+        headline: t('guard.fallback.headline'),
         details: [
-          '最初の中継は審査されていない普通の隣人です。送信元を隠す力が弱くなっています。',
-          reasonText(status.reason) ?? '信頼 Guard への接続が戻れば、自動で切り替わります。',
+          t('guard.fallback.detail1'),
+          reasonText(status.reason) ?? t('guard.fallback.detail2'),
         ],
       };
 
     case 'open':
       return {
         tone: 'warn',
-        label: '警告: 信頼 Guard 未設定',
-        headline: '信頼 Guard のリストが設定されていません。',
+        label: t('guard.open.label'),
+        headline: t('guard.open.headline'),
         details: [
-          '最初の中継は審査されていない普通の隣人です。送信元を隠す力が弱くなっています。',
-          'この版のアプリにはメンテナの公開鍵が組み込まれていないか、リストが取り込まれていません。',
+          t('guard.open.detail1'),
+          t('guard.open.detail2'),
         ],
       };
 
@@ -63,11 +64,11 @@ export function describeGuardStatus(status: GuardStatus): GuardView {
       if (status.reason === 'list-expired') {
         return {
           tone: 'warn',
-          label: '警告: 信頼リストが期限切れ',
-          headline: '信頼リストが期限切れのため、普通の隣人での匿名経路を準備しています。',
+          label: t('guard.expired.label'),
+          headline: t('guard.expired.headline'),
           details: [
             reasonText(status.reason)!,
-            '準備が整うと投稿は送信されますが、送信元を隠す力は弱い状態です。',
+            t('guard.expired.detail2'),
           ],
         };
       }
@@ -75,18 +76,18 @@ export function describeGuardStatus(status: GuardStatus): GuardView {
       if (status.reason && !WAITING_REASONS.has(status.reason)) {
         return {
           tone: 'warn',
-          label: '警告: 匿名経路を確立できません',
-          headline: '匿名経路を作れていないため、投稿は送信されません。',
-          details: [reasonText(status.reason) ?? '原因が解消されるまでお待ちください。'],
+          label: t('guard.noRoute.label'),
+          headline: t('guard.noRoute.headline'),
+          details: [reasonText(status.reason) ?? t('guard.noRoute.detail1')],
         };
       }
       return {
         tone: 'pending',
-        label: '匿名経路を準備中…',
-        headline: '匿名経路を準備しています。',
+        label: t('guard.pending.label'),
+        headline: t('guard.pending.headline'),
         details: [
-          '起動直後は数十秒ほどかかることがあります。通常の準備で、エラーではありません。',
-          '準備が整うまで、投稿は送信されずに待ちます。',
+          t('guard.pending.detail1'),
+          t('guard.pending.detail2'),
         ],
       };
     }
@@ -97,15 +98,15 @@ export function describeGuardStatus(status: GuardStatus): GuardView {
 export function reasonText(reason: string | undefined): string | null {
   switch (reason) {
     case 'list-expired':
-      return '受け入れていた信頼リストが期限切れです。新しいリストを取り込んでください。';
+      return t('guard.reason.listExpired');
     case 'no-list':
-      return '信頼リストがまだありません。';
+      return t('guard.reason.noList');
     case 'waiting-for-trusted-guard':
-      return '信頼 Guard への接続を待っています。';
+      return t('guard.reason.waitingTrusted');
     case 'waiting-for-candidates':
-      return '接続先の候補を集めています。';
+      return t('guard.reason.waitingCandidates');
     case 'no-trusted-guard-connected':
-      return '信頼リストに載っている Guard に、いま接続できていません。';
+      return t('guard.reason.noTrustedConnected');
     default:
       return null;
   }
@@ -115,27 +116,27 @@ export function reasonText(reason: string | undefined): string | null {
 export function importFailureText(reason: Extract<GuardListResult, { ok: false }>['reason']): string {
   switch (reason) {
     case 'malformed':
-      return 'リストの形式が正しくありません';
+      return t('guard.import.malformed');
     case 'too-large':
-      return 'リストが大きすぎます';
+      return t('guard.import.tooLarge');
     case 'no-keyset':
-      return 'この版のアプリにはメンテナの公開鍵が組み込まれていません';
+      return t('guard.import.noKeyset');
     case 'insufficient-signatures':
-      return 'メンテナの署名が足りません';
+      return t('guard.import.insufficientSignatures');
     case 'rollback':
-      return '手元のリストより古い版です';
+      return t('guard.import.rollback');
     case 'expired':
-      return '期限切れのリストです';
+      return t('guard.import.expired');
     case 'not-yet-valid':
-      return 'まだ有効になっていないリストです (発行時刻が未来です)';
+      return t('guard.import.notYetValid');
     case 'validity-too-long':
-      return '有効期間が長すぎるリストです';
+      return t('guard.import.validityTooLong');
     case 'bad-guard':
-      return 'Guard の記述に問題があります (署名か形式を確認してください)';
+      return t('guard.import.badGuard');
     case 'too-many-guards':
-      return 'Guard の数が上限を超えています';
+      return t('guard.import.tooManyGuards');
     default:
-      return 'リストを取り込めませんでした';
+      return t('guard.import.default');
   }
 }
 
@@ -152,14 +153,12 @@ export function needsWeakRouteConfirmation(status: GuardStatus): boolean {
   return status.mode === 'none' && status.reason === 'list-expired';
 }
 
-/** 確認ダイアログの文言 (平易な日本語) */
+/** 確認ダイアログの文言 (平易な日本語)。言語に合わせて引くので getter */
 export const WEAK_ROUTE_CONFIRM_TEXT = {
-  title: '送信元が特定されやすい状態です',
-  body: [
-    '今は、最初の中継が審査されていない普通の相手になっています (信頼できる中継に接続できていません)。',
-    'この状態で書き込むと、悪意のある相手に当たった場合、この投稿があなたから送られたと突き止められやすくなります。',
-    '信頼できる中継に接続できるまで待つと、より安全に投稿できます。',
-  ],
-  proceed: 'それでも投稿する',
-  cancel: 'やめる',
-} as const;
+  get title() { return t('guard.weakConfirm.title'); },
+  get body() {
+    return [t('guard.weakConfirm.body1'), t('guard.weakConfirm.body2'), t('guard.weakConfirm.body3')];
+  },
+  get proceed() { return t('guard.weakConfirm.proceed'); },
+  get cancel() { return t('guard.weakConfirm.cancel'); },
+};

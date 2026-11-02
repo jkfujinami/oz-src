@@ -66,21 +66,48 @@ export class RecentBuffer {
   /** 上限で捨てたものの受け取り時刻の最大。これ以前に受け取った分は欠けているかもしれない */
   private evictedUpToAt = 0;
 
-  public readonly windowMs: number;
-  public readonly maxBytes: number;
+  private window_: number;
+  private maxBytes_: number;
 
   constructor(opts: RecentBufferOptions) {
-    this.windowMs = opts.windowMs;
-    this.maxBytes = opts.maxBytes;
+    this.window_ = opts.windowMs;
+    this.maxBytes_ = opts.maxBytes;
     this.now = opts.now ?? Date.now;
     this.createdAt = this.now();
   }
 
+  /** 役割ごとの既定の大きさ */
+  public static limitsFor(role: 'client' | 'guard'): { windowMs: number; maxBytes: number } {
+    return role === 'guard'
+      ? { windowMs: RECENT_BUFFER.GUARD_WINDOW_MS, maxBytes: RECENT_BUFFER.GUARD_MAX_BYTES }
+      : { windowMs: RECENT_BUFFER.NODE_WINDOW_MS, maxBytes: RECENT_BUFFER.NODE_MAX_BYTES };
+  }
+
   /** 役割に応じた既定の大きさで作る */
   public static forRole(role: 'client' | 'guard', now?: () => number): RecentBuffer {
-    return role === 'guard'
-      ? new RecentBuffer({ windowMs: RECENT_BUFFER.GUARD_WINDOW_MS, maxBytes: RECENT_BUFFER.GUARD_MAX_BYTES, now })
-      : new RecentBuffer({ windowMs: RECENT_BUFFER.NODE_WINDOW_MS, maxBytes: RECENT_BUFFER.NODE_MAX_BYTES, now });
+    return new RecentBuffer({ ...RecentBuffer.limitsFor(role), now });
+  }
+
+  public get windowMs(): number {
+    return this.window_;
+  }
+
+  public get maxBytes(): number {
+    return this.maxBytes_;
+  }
+
+  /**
+   * 保持時間と上限を替える (信頼 Guard を使えていない間、一般のノードも Guard 並みに持つ: OzNode)。
+   * ★ 延ばしても、前の保持時間の外で捨てた分は戻らない。「ここから先は全部持っている」(coverageStartMs) を
+   *   延ばした時点の前の保持時間の端に留め、追いつきの相手に持っていない分まで持っていると申告しない
+   *   (申告すると、相手は status = OK で取り逃しを永久に埋めなくなる)。
+   */
+  public resize(windowMs: number, maxBytes: number): void {
+    const now = this.now();
+    if (windowMs > this.window_) this.evictedUpToAt = Math.max(this.evictedUpToAt, now - this.window_ - 1);
+    this.window_ = windowMs;
+    this.maxBytes_ = maxBytes;
+    this.evict(now);
   }
 
   public get size(): number {
@@ -124,10 +151,10 @@ export class RecentBuffer {
   }
 
   private evict(now: number): void {
-    const horizon = now - this.windowMs;
+    const horizon = now - this.window_;
     for (const [id, e] of this.entries) {
       const expired = e.at < horizon;
-      const overCap = this.totalBytes > this.maxBytes;
+      const overCap = this.totalBytes > this.maxBytes_;
       if (!expired && !overCap) break;
       this.entries.delete(id);
       this.totalBytes -= e.bytes.length;
@@ -142,7 +169,7 @@ export class RecentBuffer {
    */
   public coverageStartMs(): number {
     const now = this.now();
-    return Math.max(this.createdAt, now - this.windowMs, this.evictedUpToAt + 1);
+    return Math.max(this.createdAt, now - this.window_, this.evictedUpToAt + 1);
   }
 
   /**

@@ -8,15 +8,20 @@ import ThreadView from './components/ThreadView';
 import { OzzyVaultView } from './components/OzzyVaultView';
 import { SettingsView, type SettingsSection } from './components/SettingsView';
 import { AboutView } from './components/AboutView';
+import { StatusLogView } from './components/StatusLogView';
+import { startLogHistory, forgetLogs } from './lib/logHistory';
 import { TermsGate } from './components/TermsGate';
 import { useRoute, absorbLocationHash, dismissKeyLinkNotice } from './lib/route';
 import { resetOzzyPrefs } from './lib/ozzyPrefs';
+import { forgetOzzySession } from './lib/ozzySession';
 import type { GuardTrustConfig } from './lib/guardSetting';
 import { installConsoleHandle } from '@oz/core';
+import { useT } from './i18n';
 
 export type { MainSection } from './components/Sidebar';
 
 export function RouterView({ initialSection = 'board' }: { initialSection?: MainSection } = {}) {
+  const t = useT();
   const { route, droppedKeyLink } = useRoute();
   const [mainSection, setMainSection] = useState<MainSection>(initialSection);
   const [settingsFocus, setSettingsFocus] = useState<{ section?: SettingsSection; nonce: number }>({ nonce: 0 });
@@ -32,8 +37,8 @@ export function RouterView({ initialSection = 'board' }: { initialSection?: Main
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
 
-  // ファイル共有の設定はメモリだけ。ロック (この画面が消える) で既定に戻す
-  useEffect(() => () => resetOzzyPrefs(), []);
+  // ファイル共有の設定はメモリだけ。ロック (この画面が消える) で既定に戻す。ログの行と記録の細かさ、作ったリンクも同じ
+  useEffect(() => () => { resetOzzyPrefs(); forgetLogs(); forgetOzzySession(); }, []);
 
   // 板やスレッドへ移動した (保存済みの板を選んだ・板を作った等) ときは掲示板の画面に切り替える
   const routeKey = `${route.board}/${route.thread ?? ''}`;
@@ -57,11 +62,10 @@ export function RouterView({ initialSection = 'board' }: { initialSection?: Main
         {droppedKeyLink && (
           <div role="note" className="alert alert-warn" style={{ marginBottom: 16, justifyContent: 'space-between', alignItems: 'center' }}>
             <span>
-              リンクに含まれていた板の鍵は受け付けていません (閲覧履歴に残るため)。
-              共有コードを受け取っている場合は、サイドバーの「共有コードで参加」に貼り付けてください。
+              {t('app.keyLinkDropped')}
             </span>
             <button className="btn btn-sm" onClick={dismissKeyLinkNotice}>
-              閉じる
+              {t('app.close')}
             </button>
           </div>
         )}
@@ -69,6 +73,8 @@ export function RouterView({ initialSection = 'board' }: { initialSection?: Main
           <OzzyVaultView onOpenSettings={() => select('settings', 'ozzy')} onOpenAbout={() => select('about')} />
         ) : mainSection === 'settings' ? (
           <SettingsView focus={settingsFocus.section} focusNonce={settingsFocus.nonce} />
+        ) : mainSection === 'status' ? (
+          <StatusLogView />
         ) : mainSection === 'about' ? (
           <AboutView />
         ) : route.thread ? (
@@ -110,6 +116,7 @@ export default function App({ badge = 'Desktop Full Node', defaultTrackerUrl = n
   useEffect(() => {
     absorbLocationHash(false);
     installConsoleHandle();
+    startLogHistory();
   }, []);
   return (
     <AppConfigContext.Provider value={{ badge }}>

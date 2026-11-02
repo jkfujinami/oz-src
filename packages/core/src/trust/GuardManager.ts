@@ -328,6 +328,19 @@ export class GuardManager implements GuardPolicy {
     return this.current;
   }
 
+  /**
+   * 信頼 Guard を使えていないか: オープン (リストが無い・失効)・fallback (リストの Guard に誰もつながらない)・
+   * それらで普通の隣人を選ぶ条件を待っているとき。この間は一般のノードも Guard 並みに受け持つ (OzNode)。
+   * ★ 決めるのは署名つきのリストと接続の状態だけ。網の人数では決めない (偽の参加者で水増しして、他人の動作を切り替えられる)。
+   * ★ リストがあって信頼 Guard を待っている猶予の間 (起動直後・失った直後) は含めない。つながれば戻すことになり、行ったり来たりする。
+   */
+  public get withoutTrustedGuard(): boolean {
+    const s = this.current;
+    if (s.mode === 'trusted') return false;
+    if (s.mode === 'none' && this.hasUsableList && s.reason !== 'waiting-for-candidates') return false;
+    return true;
+  }
+
   public onStatus(cb: (s: GuardStatus) => void): () => void {
     this.listeners.add(cb);
     return () => { this.listeners.delete(cb); };

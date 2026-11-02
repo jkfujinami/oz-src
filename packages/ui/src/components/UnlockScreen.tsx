@@ -3,6 +3,7 @@ import { useP2P, MIN_PASSPHRASE_LENGTH } from '../providers/P2PProvider';
 import { SecurityInfo } from './SecurityInfo';
 import { estimateStrength, generatePassphrase } from '../lib/passphrase';
 import { BrandMark } from './BrandMark';
+import { useT } from '../i18n';
 
 /**
  * パスワード画面。
@@ -11,6 +12,7 @@ import { BrandMark } from './BrandMark';
  * 全データを消して作り直すしかない (復元手段を作ると、その分だけ押収に弱くなる)。
  */
 export function UnlockScreen() {
+  const t = useT();
   const { lockState, unlock, unlockError, resetAll } = useP2P();
   const [passphrase, setPassphrase] = useState('');
   const [confirm, setConfirm] = useState('');
@@ -27,11 +29,11 @@ export function UnlockScreen() {
     setLocalError(null);
     if (isSetup) {
       if (passphrase.length < MIN_PASSPHRASE_LENGTH) {
-        setLocalError(`パスワードは ${MIN_PASSPHRASE_LENGTH} 文字以上にしてください`);
+        setLocalError(t('unlock.tooShort', { min: MIN_PASSPHRASE_LENGTH }));
         return;
       }
       if (passphrase !== confirm) {
-        setLocalError('確認用のパスワードが一致しません');
+        setLocalError(t('unlock.mismatch'));
         return;
       }
     }
@@ -74,24 +76,24 @@ export function UnlockScreen() {
         <div className="unlock-brand">
           <BrandMark />
           <span className="brand-name">OZ</span>
-          <span className="badge">端点暗号化</span>
+          <span className="badge">{t('unlock.badge')}</span>
         </div>
 
         <h2 className="unlock-title">
-          {isSetup ? 'パスワードを設定' : 'ロックを解除'}
+          {isSetup ? t('unlock.setupTitle') : t('unlock.unlockTitle')}
         </h2>
         <p className="unlock-lead">
           {isSetup
-            ? 'この端末に保存されるすべてのデータ (投稿履歴・板の鍵など) をこのパスワードで暗号化します。忘れると復元できません。'
-            : 'この端末のデータは暗号化されています。パスワードを入力してください。'}
+            ? t('unlock.setupLead')
+            : t('unlock.unlockLead')}
         </p>
 
         <form onSubmit={onSubmit} className="stack">
           <div className="field">
             <input
               type="password"
-              aria-label="パスワード"
-              placeholder="パスワード"
+              aria-label={t('unlock.password')}
+              placeholder={t('unlock.password')}
               autoComplete={isSetup ? 'new-password' : 'current-password'}
               value={passphrase}
               onChange={(e) => { setPassphrase(e.target.value); setGenerated(null); }}
@@ -104,8 +106,8 @@ export function UnlockScreen() {
             <div className="field">
               <input
                 type="password"
-                aria-label="パスワード (確認)"
-                placeholder="パスワード (確認)"
+                aria-label={t('unlock.confirm')}
+                placeholder={t('unlock.confirm')}
                 autoComplete="new-password"
                 value={confirm}
                 onChange={(e) => { setConfirm(e.target.value); setGenerated(null); }}
@@ -120,7 +122,7 @@ export function UnlockScreen() {
               className="strength"
               style={{ color: STRENGTH_COLOR[strength.level] }}
             >
-              <span>強さの目安: {strength.label}</span>
+              <span>{t('unlock.strength', { label: strength.label })}</span>
             </div>
           )}
 
@@ -132,10 +134,10 @@ export function UnlockScreen() {
                 onClick={onGenerate}
                 disabled={busy}
               >
-                パスワードを作る
+                {t('unlock.generate')}
               </button>
               <span className="field-hint">
-                読みやすい長いパスワードを自動で作ります
+                {t('unlock.generateHint')}
               </span>
             </div>
           )}
@@ -144,9 +146,9 @@ export function UnlockScreen() {
             <div className="alert alert-info">
               <div className="stack stack-sm grow">
                 <div className="xsmall text-2">
-                  このパスワードを、端末の外 (紙など) に控えてください。忘れると復元できません。
+                  {t('unlock.noteDown')}
                 </div>
-                <code aria-label="作成したパスワード" className="code-block is-gold">
+                <code aria-label={t('unlock.generatedLabel')} className="code-block is-gold">
                   {generated}
                 </code>
               </div>
@@ -159,7 +161,7 @@ export function UnlockScreen() {
             disabled={busy || passphrase.length === 0}
             style={{ marginTop: 8 }}
           >
-            {busy ? '起動中...' : isSetup ? '設定して開始' : '解除'}
+            {busy ? t('unlock.starting') : isSetup ? t('unlock.setupSubmit') : t('unlock.submit')}
           </button>
         </form>
 
@@ -171,7 +173,7 @@ export function UnlockScreen() {
 
         {isSetup && (
           <details className="disclosure" open>
-            <summary>OZ で守れること・守れないこと</summary>
+            <summary>{t('unlock.securityTitle')}</summary>
             <div className="disclosure-body">
               <SecurityInfo compact />
             </div>
@@ -187,8 +189,8 @@ export function UnlockScreen() {
               disabled={busy}
             >
               {confirmReset
-                ? 'もう一度押すと、この端末の全データを消去して作り直します (元に戻せません)'
-                : 'パスワードを忘れた場合'}
+                ? t('unlock.resetAgain')
+                : t('unlock.forgot')}
             </button>
           </div>
         )}

@@ -1,4 +1,5 @@
 import { KeyManager, type IndexedDBStore } from '@oz/core';
+import { t } from '../i18n';
 
 /**
  * 鍵を共有しなくても誰でも読める公開板 (サイドバーに並べる順)。
@@ -6,8 +7,10 @@ import { KeyManager, type IndexedDBStore } from '@oz/core';
  * ★ ID を変えると別の板になる (前の ID の板の投稿は見えなくなる)。
  */
 export const PUBLIC_BOARDS: ReadonlyArray<{ readonly id: string; readonly name: string }> = [
-  { id: 'zatsudan', name: '雑談' },
-  { id: 'files', name: 'ファイル共有スレッド' },
+  // name は言語に合わせて引く (getter)
+  { id: 'zatsudan', get name() { return t('board.public.zatsudan'); } },
+  { id: 'files', get name() { return t('board.public.files'); } },
+  { id: 'dev', get name() { return t('board.public.dev'); } },
 ];
 
 /** 起動したとき・板が分からないときに開く板 */

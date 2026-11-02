@@ -37,7 +37,7 @@ import { ThreadOrchestrator } from '../logic/ThreadOrchestrator';
 import type { IPoWEngine, IKeyManager, ISignalingClient } from '../types';
 import { GuardManager, type GuardManagerOptions, type GuardStatus } from '../trust/GuardManager';
 import type { MaintainerKeySet, GuardListResult } from '../trust/TrustedGuards';
-import { GUARD_MAX_DEGREE, RING_MESH } from '../constants';
+import { GUARD_MAX_DEGREE, OPEN_SERVICE_MAX_DEGREE, RING_MESH } from '../constants';
 import { Encoding } from '../common/Encoding';
 import { createLogger } from '../common/Logger';
 import {
@@ -50,6 +50,8 @@ import { OzzyWorkerPool, checkOzzyWorker, normalizeOzzyWorkerUrl } from '../ozzy
 
 /** 自分の中継 Worker の URL を置く暗号化 DB の設定名 */
 const OZZY_WORKER_SETTING_KEY = 'ozzy.workerUrl';
+/** 直接つなぐ端末 (デスクトップ) で、利用者が M1 の役を切ったか (true なら切っている。既定は受け持つ) */
+const OZZY_FETCHER_OFF_KEY = 'ozzy.fetcherOff';
 /** Ozzy の Manifest (置き場所入り) の大きさの上限。これより大きいものは取らない */
 const OZZY_MANIFEST_MAX_BYTES = 16 * 1024 * 1024;
 
@@ -62,6 +64,21 @@ export interface FileUpload {
   cancel(): void;
   pause(): void;
   resume(): void;
+}
+
+/** 画面の「状態とログ」に出す数 (その時点の写し)。どれも端末の中の数で、網には何も問い合わせない */
+export interface NodeDiagnostics {
+  peers: { connected: number; verified: number; maxDegree: number };
+  route: { ready: boolean; middles: number };
+  guardMode: string;
+  openGuardService: boolean;
+  trackerConnected: boolean;
+  storage: { leaseSets: number; slots: number };
+  recent: { posts: number; bytes: number };
+  history: { fetches: number; attempts: number; rejectedPackets: number; badChunks: number };
+  relayed: { requests: number; bytes: number };
+  /** 捨てた数 (中継の制限・受信のレート制限・握手前の取り置きの上限) */
+  dropped: { relay: number; rate: number; preVerify: number };
 }
 
 export interface OzNodeConfig {
@@ -138,9 +155,13 @@ export interface OzNodeConfig {
    * - `fetchRange`: 取得役としてロッカーから取る関数を差し替える (★ テスト・サーバー用。渡すと Worker の設定なしで M1 になる)。
    * - `jobRunner`: M1 としてロッカーへのアップロード・削除を実行する関数を差し替える (★ テスト用。fetchRange と一緒に渡す)。
    * - `extraAllowedHosts`: 取得役が取りに行ってよいホストの追加。既定の許可リストは公開ロッカーだけ。
+   * - `lockerTransport`: ロッカーへ直接つなぐ通信路 (デスクトップの main が受け持つ。ozzy/DirectLockerTransport)。
+   *   渡すと Worker を一切使わない: 自分の Worker が無くても Ozzy を使え、M1 の役もこの通信路で受け持つ
+   *   (利用者が setOzzyFetcherEnabled(false) で切れる)。★ M1 として取りに行ったロッカーには、この端末の IP が見える。
    */
   ozzy?: {
     fetcher?: boolean; fetchRange?: OzzyRangeFetchFn; jobRunner?: OzzyLockerJobRunner; extraAllowedHosts?: readonly string[];
+    lockerTransport?: HttpTransportFn;
   };
   guardOptions?: Pick<
     GuardManagerOptions,
@@ -211,6 +232,11 @@ export class OzNode {
   private isStarted = false;
   private retention: { stop: () => void } | null = null;
   private isDestroyed = false;
+  /** いまの受け持ち (followGuardStatus)。'guard' = 信頼 Guard を使えていない間の Guard 並み */
+  private serviceLevel: 'guard' | 'client' = 'client';
+  /** M1 の役を受け持っているか (ozzyFetcherEnabled) */
+  private fetcherOn = false;
+  private unsubServiceLevel: (() => void) | null = null;
 
   private constructor(
     params: {
@@ -283,6 +309,7 @@ export class OzNode {
       this.peerManager, this.circuit, this.ozzyConfig?.fetchRange ? this.makeRangeServer() : null,
       { dispatcher: this.dispatcher, jobRunner: this.ozzyConfig?.fetchRange ? this.makeJobRunner() : null },
     );
+    this.fetcherOn = this.ozzyConfig?.fetchRange !== undefined && this.ozzyConfig?.fetcher !== false;
     this.ozzyReplyRelay = new OzzyOnionReplyRelay(this.peerManager, this.dispatcher, this.nodeIdentity);
     this.ozzyMesh = new OzzyMeshFetcher({ circuit: this.circuit, peerManager: this.peerManager, dispatcher: this.dispatcher });
     this.ozzyManifestStore = {
@@ -519,9 +546,16 @@ export class OzNode {
       chunkEffort: config.storage?.chunkEffort,
     });
 
-    // Ozzy: 設定済みの自分の中継 Worker を戻す (無ければ、設定されるまで Ozzy と M1 の役は止めておく)
-    const savedWorker = await db.getSetting(OZZY_WORKER_SETTING_KEY);
-    if (typeof savedWorker === 'string' && normalizeOzzyWorkerUrl(savedWorker)) node.applyOzzyWorker(savedWorker);
+    if (!isGuardRole) node.followGuardStatus();
+
+    if (config.ozzy?.lockerTransport) {
+      // Ozzy (デスクトップ): Worker を使わない。M1 の役は、利用者が切っていなければ直接の通信路で受け持つ
+      node.applyDirectFetcher((await db.getSetting(OZZY_FETCHER_OFF_KEY)) !== true);
+    } else {
+      // Ozzy: 設定済みの自分の中継 Worker を戻す (無ければ、設定されるまで Ozzy と M1 の役は止めておく)
+      const savedWorker = await db.getSetting(OZZY_WORKER_SETTING_KEY);
+      if (typeof savedWorker === 'string' && normalizeOzzyWorkerUrl(savedWorker)) node.applyOzzyWorker(savedWorker);
+    }
 
     if (config.autoStart) {
       await node.start();
@@ -570,6 +604,35 @@ export class OzNode {
    * ノードの全通信を停止し、リソースを解放する。
    */
   /**
+   * 一般のノード (role: 'client') は、信頼 Guard を使えていない間 (GuardManager.withoutTrustedGuard) だけ Guard 並みに受け持つ:
+   * 直近の投稿を 72 時間持ち (追いつきを 1 時間ぶんに縮めない)、中継の表を Guard の大きさにし、次数の上限を OPEN_SERVICE_MAX_DEGREE に上げる。
+   * ★ この間は誰もが 1 ホップ目に選ばれうる。一般のノードが 1 時間ぶんしか持たず、受け入れも 16 人までだと、
+   *   Guard 役で起動している少数のノードに利用者が集中し、それ以外を選んだ利用者は追いつきが 1 時間ぶんしか戻らない。
+   * ★ Guard 役と違って peerId は固定しない (リストに載らないので固定する理由が無く、固定すると起動をまたいで同じ端末だと追える)。
+   * ★ 信頼 Guard につながったら元に戻す。署名つきの Guard の仕組みはそのまま。
+   */
+  private followGuardStatus(): void {
+    const apply = () => {
+      if (this.isDestroyed) return;
+      const level = this.guards.withoutTrustedGuard ? 'guard' : 'client';
+      if (level === this.serviceLevel) return;
+      this.serviceLevel = level;
+      const { windowMs, maxBytes } = RecentBuffer.limitsFor(level);
+      this.recent.resize(windowMs, maxBytes);
+      this.tunnelRelay.setRole(level);
+      this.peerManager.setMaxDegree(level === 'guard' ? OPEN_SERVICE_MAX_DEGREE : RING_MESH.MAX_DEGREE);
+      log.debug(() => `service level: ${level} (guard mode ${this.guards.status.mode})`);
+    };
+    this.unsubServiceLevel = this.guards.onStatus(apply);
+    apply();
+  }
+
+  /** 信頼 Guard を使えていない間の Guard 並みの受け持ちをしているか (診断・UI 用。Guard 役のノードは false) */
+  public get servesAsOpenGuard(): boolean {
+    return this.serviceLevel === 'guard';
+  }
+
+  /**
    * ノードの全通信を止め、全タイマーを解放する。停止は終端で、再開はできない。
    *
    * ★ 旧実装は Schrödinger の再放流を止めて接続を切るだけだった。
@@ -581,6 +644,8 @@ export class OzNode {
     if (this.isDestroyed) return;
     this.isDestroyed = true;
     this.isStarted = false;
+    this.unsubServiceLevel?.();
+    this.unsubServiceLevel = null;
 
     this.retention?.stop();
     this.retention = null;
@@ -682,9 +747,37 @@ export class OzNode {
     return this.ozzyWorkers.own;
   }
 
-  /** Ozzy を使えるか (自分の中継 Worker を設定済み) */
+  /** Ozzy を使えるか (直接つなぐ端末か、自分の中継 Worker を設定済み) */
   public get ozzyReady(): boolean {
-    return this.ozzyWorkers.own !== null;
+    return this.ozzyDirect || this.ozzyWorkers.own !== null;
+  }
+
+  /** ロッカーへ直接つなぐ端末か (デスクトップ。Worker を使わない) */
+  public get ozzyDirect(): boolean {
+    return this.ozzyConfig?.lockerTransport !== undefined;
+  }
+
+  /** M1 の役 (回路で頼まれた取得・アップロード) を受け持っているか */
+  public get ozzyFetcherEnabled(): boolean {
+    return this.fetcherOn;
+  }
+
+  /**
+   * 直接つなぐ端末 (デスクトップ) で、M1 の役を受け持つかを切り替える。暗号化 DB に保存する。
+   * ★ 受け持つと、他人のために取りに行ったロッカーにこの端末の IP が見える。切っても自分が Ozzy を使うことはできる
+   *   (取得・アップロードは回路の先の別の M1 が受け持つ)。
+   */
+  public async setOzzyFetcherEnabled(on: boolean): Promise<void> {
+    if (this.isDestroyed) throw new Error('OzNode: node is stopped');
+    if (!this.ozzyDirect) throw new Error('OzNode: only a node that connects to lockers directly can switch the M1 role');
+    await this.db.setSetting(OZZY_FETCHER_OFF_KEY, on ? null : true);
+    this.applyDirectFetcher(on);
+  }
+
+  private applyDirectFetcher(on: boolean): void {
+    const enabled = on && this.ozzyConfig?.fetcher !== false;
+    this.fetcherOn = enabled;
+    this.ozzyExit.setServer(enabled ? this.makeRangeServer() : null, enabled ? this.makeJobRunner() : null);
   }
 
   /**
@@ -694,8 +787,10 @@ export class OzNode {
    */
   public async setOzzyWorker(
     url: string | null, check: (url: string) => ReturnType<typeof checkOzzyWorker> = (u) => checkOzzyWorker(u),
-  ): Promise<{ ok: true } | { ok: false; reason: 'bad-url' | 'unreachable' | 'not-ozzy' | 'outdated' }> {
+  ): Promise<{ ok: true } | { ok: false; reason: 'bad-url' | 'unreachable' | 'not-ozzy' | 'outdated' | 'direct' }> {
     if (this.isDestroyed) throw new Error('OzNode: node is stopped');
+    // 直接つなぐ端末 (デスクトップ) は Worker を使わない
+    if (this.ozzyDirect) return { ok: false, reason: 'direct' };
     if (url === null) {
       await this.db.setSetting(OZZY_WORKER_SETTING_KEY, null);
       this.applyOzzyWorker(null);
@@ -713,8 +808,14 @@ export class OzNode {
   private applyOzzyWorker(url: string | null): void {
     this.ozzyWorkers.setOwn(url);
     if (!this.ozzyConfig?.fetchRange) {
+      this.fetcherOn = url !== null && this.ozzyConfig?.fetcher !== false;
       this.ozzyExit.setServer(url ? this.makeRangeServer() : null, url ? this.makeJobRunner() : null);
     }
+  }
+
+  /** ロッカーへの通信路: 直接つなぐ端末はそれ、それ以外は他人の中継 Worker */
+  private lockerTransport(): HttpTransportFn {
+    return this.ozzyConfig?.lockerTransport ?? this.relayTransport();
   }
 
   /** ロッカーへは、交換で集めた他人の中継 Worker を通して行く (自分の IP をロッカーに見せない・直接は行かない) */
@@ -726,7 +827,7 @@ export class OzNode {
   private makeRangeServer(): OzzyRangeServer | null {
     if (this.ozzyConfig?.fetcher === false) return null;
     return new OzzyRangeServer({
-      fetchRange: this.ozzyConfig?.fetchRange ?? createLockerRangeFetch(this.relayTransport()),
+      fetchRange: this.ozzyConfig?.fetchRange ?? createLockerRangeFetch(this.lockerTransport()),
       extraAllowedHosts: this.ozzyConfig?.extraAllowedHosts,
     });
   }
@@ -735,7 +836,7 @@ export class OzNode {
   private makeJobRunner(): OzzyLockerJobRunner | null {
     if (this.ozzyConfig?.fetcher === false) return null;
     if (this.ozzyConfig?.fetchRange) return this.ozzyConfig.jobRunner ?? null;
-    return createLockerJobRunner(this.relayTransport());
+    return createLockerJobRunner(this.lockerTransport());
   }
 
   /** Manifest を P2P のファイル保管に置き、WebLite のファイルリンクの本体を返す */
@@ -881,6 +982,28 @@ export class OzNode {
   /** Guard の現在の状態 (信頼 Guard か、警告状態か、リストの版と期限) */
   public get guardStatus(): GuardStatus {
     return this.guards.status;
+  }
+
+  /** 画面の「状態とログ」に出す数。呼ぶたびに作り直す (2 秒ごと程度で読む想定) */
+  public diagnostics(): NodeDiagnostics {
+    const sum = (vals: Iterable<number>) => { let n = 0; for (const v of vals) n += v; return n; };
+    const relay = this.tunnelRelay.stats;
+    return {
+      peers: { connected: this.degree, verified: this.peerManager.verifiedPeers.length, maxDegree: this.peerManager.maxDegree },
+      route: { ready: this.circuit.routeReady, middles: this.circuit.middleCandidateCount },
+      guardMode: this.guards.status.mode,
+      openGuardService: this.servesAsOpenGuard,
+      trackerConnected: this.trackerConnected,
+      storage: { leaseSets: this.storage.leaseSets.size, slots: this.storage.capacitySlots },
+      recent: { posts: this.recent.size, bytes: this.recent.bytes },
+      history: { ...this.history.stats },
+      relayed: { requests: relay.forwarded.requests, bytes: relay.forwarded.bytes },
+      dropped: {
+        relay: sum(Object.values(relay.dropped)),
+        rate: sum(this.rateLimiter.dropped.values()),
+        preVerify: this.peerManager.preVerifyDropped,
+      },
+    };
   }
 
   /** Guard の状態の変化を購読する。戻り値は購読解除 */

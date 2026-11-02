@@ -12,12 +12,14 @@ import {
   type GuardStatus,
   type GuardListResult,
   createLogger,
+  createSchemeLockerTransport,
 } from '@oz/core';
 
 import { loadTrackerUrl, saveTrackerUrl, loadIceServers, saveIceServers } from '../lib/trackerSetting';
 import type { GuardTrustConfig } from '../lib/guardSetting';
 import { resetRoute } from '../lib/route';
 import { clearTermsAccepted } from '../lib/terms';
+import { t } from '../i18n';
 import { useAutoLock } from '../hooks/useAutoLock';
 
 const log = createLogger('ui.p2p');
@@ -121,14 +123,14 @@ export const P2PContext = createContext<P2PContextType>({
   panicWipe: noop,
   lock: noop,
   trackerUrl: null,
-  setTrackerUrl: async () => ({ ok: false, error: 'ロックを解除してください' }),
+  setTrackerUrl: async () => ({ ok: false, error: t('p2p.unlockFirst') }),
   iceServers: [],
   effectiveIceServers: [],
   defaultStunServer: null,
-  setIceServers: async () => ({ ok: false, error: 'ロックを解除してください' }),
+  setIceServers: async () => ({ ok: false, error: t('p2p.unlockFirst') }),
   guardStatus: NO_GUARD_STATUS,
   guardTrustConfigured: false,
-  importGuardList: async () => ({ ok: false, reason: 'malformed', detail: 'ロックを解除してください' }),
+  importGuardList: async () => ({ ok: false, reason: 'malformed', detail: 'ロックを解除してください' }), // i18n-ignore: 画面に出さない (GuardPanel は reason だけ使う)
 });
 
 export const P2PContextForTest = P2PContext;
@@ -201,6 +203,8 @@ export function P2PProvider({
         passphrase,
         autoStart: false,
         storage: { defaultSlots: electronApi() ? DESKTOP_DEFAULT_SLOTS : WEB_DEFAULT_SLOTS },
+        // ★ デスクトップの Ozzy は Worker を使わず、main からロッカーへ直接つなぐ (ozlocker://)。ブラウザは Worker が要る
+        ...(electronApi()?.ozzyDirect === true ? { ozzy: { lockerTransport: createSchemeLockerTransport() } } : {}),
         // 信頼 Guard の設定 (無ければ渡さない = オープン動作)
         ...(trust ? { trust } : {}),
         ...(iceServers && iceServers.length > 0 ? { iceServers } : {}),
@@ -229,10 +233,10 @@ export function P2PProvider({
       // 鍵をメモリに残さない (次の試行で必ずパスワードを照合させる)
       storeRef.current?.lock();
       if (err instanceof WrongPassphraseError) {
-        setUnlockError('パスワードが違います');
+        setUnlockError(t('p2p.wrongPassphrase'));
       } else {
         log.error('Failed to initialize Desktop OzNode', err);
-        setUnlockError('起動に失敗しました');
+        setUnlockError(t('p2p.startFailed'));
       }
       setLockState(previous === 'setup' ? 'setup' : 'locked');
     }
@@ -290,7 +294,7 @@ export function P2PProvider({
 
   const setTrackerUrl = useCallback(async (input: string | null): Promise<TrackerSaveResult> => {
     const current = nodeRef.current;
-    if (!current) return { ok: false, error: 'ロックを解除してください' };
+    if (!current) return { ok: false, error: t('p2p.unlockFirst') };
     let url: string | null = null;
     if (input !== null) {
       const parsed = parseTrackerUrl(input);
@@ -305,7 +309,7 @@ export function P2PProvider({
       // 設定は済んでいる。到達できなければ、ノードが定期的に再試行する
       setTrackerUrlState(current.trackerUrl);
       setIceView({ chosen: current.iceServers, effective: current.effectiveIceServers, fallback: current.defaultStunServer });
-      return { ok: true, notice: '保存しました。いまは接続できませんでした (自動で再試行します)' };
+      return { ok: true, notice: t('p2p.trackerSavedOffline') };
     }
     setTrackerUrlState(current.trackerUrl);
     setIceView({ chosen: current.iceServers, effective: current.effectiveIceServers, fallback: current.defaultStunServer });
@@ -314,7 +318,7 @@ export function P2PProvider({
 
   const setIceServers = useCallback(async (input: string | null): Promise<TrackerSaveResult> => {
     const current = nodeRef.current;
-    if (!current) return { ok: false, error: 'ロックを解除してください' };
+    if (!current) return { ok: false, error: t('p2p.unlockFirst') };
     // 既定に戻す: ビルド時の指定 (あれば) か、公開 STUN
     const wanted: string | readonly string[] | null =
       input === null || input.trim() === '' ? (iceServers && iceServers.length > 0 ? iceServers : null) : input;
@@ -322,7 +326,7 @@ export function P2PProvider({
     if (!r.ok) return { ok: false, error: describeIceError(r.reason) };
     await saveIceServers(current.db, input === null || input.trim() === '' ? null : r.servers);
     setIceView({ chosen: current.iceServers, effective: current.effectiveIceServers, fallback: current.defaultStunServer });
-    return { ok: true, notice: '保存しました。次に張る接続から使います' };
+    return { ok: true, notice: t('p2p.stunSaved') };
   }, [iceServers]);
 
   // Guard の状態を購読する。ノードが止まる (ロック・消去) と購読も解除される
@@ -337,7 +341,7 @@ export function P2PProvider({
 
   const importGuardList = useCallback(async (text: string): Promise<GuardListResult> => {
     const current = nodeRef.current;
-    if (!current) return { ok: false, reason: 'malformed', detail: 'ロックを解除してください' };
+    if (!current) return { ok: false, reason: 'malformed', detail: 'ロックを解除してください' }; // i18n-ignore: 画面に出さない
     return current.importGuardList(text);
   }, []);
 
@@ -385,7 +389,7 @@ export function P2PProvider({
 
 /** STUN の設定の誤りを、利用者向けの日本語にする */
 function describeIceError(reason: string): string {
-  if (/at most/.test(reason)) return 'STUN は 4 つまでです';
-  if (/turn/i.test(reason)) return 'TURN には対応していません (stun: で始まる URL だけ)';
-  return 'stun:ホスト名:ポート の形で入力してください (複数ならカンマ区切り)';
+  if (/at most/.test(reason)) return t('p2p.stunMax');
+  if (/turn/i.test(reason)) return t('p2p.stunTurn');
+  return t('p2p.stunFormat');
 }

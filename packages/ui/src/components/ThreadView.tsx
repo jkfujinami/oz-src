@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, KeyboardEvent, MouseEvent } from "react";
+import { useState, useEffect, useMemo, useRef, KeyboardEvent, MouseEvent } from "react";
 import { useThread } from "../hooks/useThread";
 import { useP2P } from "../providers/P2PProvider";
 import { needsWeakRouteConfirmation } from "../lib/guardStatus";
@@ -9,19 +9,32 @@ import { PostLimitNote } from "./PostLimitNote";
 import { AttachControl } from "./AttachControl";
 import { PostBody } from "./PostBody";
 import { appendToken } from "../lib/fileTokens";
+import { appendAnchor } from "../lib/anchor";
 import { confirmLeave } from "../lib/transferGuard";
 import { navigate } from "../lib/route";
 import { byteBudget, describeSubmitError } from "../lib/postLimit";
 import { boardDisplayName } from "../lib/boardKeys";
 import { KeyManager, THREAD_LIMITS, createLogger, posterId } from "@oz/core";
+import { formatDateTime, useT } from "../i18n";
 
 const log = createLogger('ui.thread');
 
-const POSTS_NOTICE = 'このスレッドは 1000 レスに達したので、これ以上書き込めません。新しいスレッドを立ててください。';
-const BYTES_NOTICE = 'このスレッドは容量の上限 (512KB) に達したので、これ以上書き込めません。新しいスレッドを立ててください。';
-const EXPIRED_NOTICE = 'このスレッドは落ちました。最後の書き込みから 30 日、またはスレッドを立ててから 90 日が過ぎると落ちます。';
 /** 残りが少なくなったことを知らせ始めるレス数 */
 const NEAR_POSTS = 900;
+
+/**
+ * 本文の整形 (HTML エスケープと >>N の印)。
+ * ★ 部品の外に置いて毎回同じ関数にする: PostBody は本文と整形が同じなら描き直さない (書き込み欄に打つたびに
+ *   全レスの本文の DOM を作り直さない。作り直すと、>>N に乗せた小窓の出し消しも乱れる)
+ */
+function formatContent(content: string): string {
+  const sanitized = content
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return sanitized.replace(
+    /&gt;&gt;(\d+)/g,
+    '<span class="anchor" data-anchor="$1">&gt;&gt;$1</span>'
+  );
+}
 
 /** 各レスの DOM id。>>N のジャンプ先に使う (packet_id は 16 進なので id にそのまま使える) */
 const postElementId = (packetId: string) => `post-${packetId}`;
@@ -33,12 +46,14 @@ export default function ThreadView({
   boardId: string;
   threadId: string;
 }) {
+  const t = useT();
   const {
     posts, status, submitReply,
     powProgress, isSubmitting, postStatus, threadState: state, resolveAnchor,
   } = useThread(boardId, threadId);
 
   const [replyInput, setReplyInput] = useState('');
+  const replyRef = useRef<HTMLTextAreaElement>(null);
   const { guardStatus } = useP2P();
   const [confirming, setConfirming] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -47,9 +62,58 @@ export default function ThreadView({
   const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => () => { if (highlightTimer.current) clearTimeout(highlightTimer.current); }, []);
 
+  // 新着: レスの一覧の最後が見えている間 (と、開いた直後の読み込み中) は全部読んだことにする。
+  // 見えていない間に届いたレスは数だけ出す (画面は勝手に動かさない)
+  const endRef = useRef<HTMLDivElement>(null);
+  const [atEnd, setAtEnd] = useState(true);
+  useEffect(() => {
+    const el = endRef.current;
+    if (!el || typeof IntersectionObserver === 'undefined') return;
+    // 下に貼り付いた書き込み欄に隠れている分は「見えていない」
+    const io = new IntersectionObserver(([e]) => setAtEnd(e.isIntersecting), { rootMargin: '0px 0px -220px 0px' });
+    io.observe(el);
+    return () => io.disconnect();
+  }, []);
+  const [seen, setSeen] = useState<ReadonlySet<string>>(() => new Set());
+  const markAll = atEnd || !!status;
+  useEffect(() => {
+    if (!markAll) return;
+    // 同じ中身なら作り直さない (描き直しの連鎖を起こさない)
+    setSeen((prev) => (prev.size === posts.length && posts.every((p) => prev.has(p.packet_id)) ? prev : new Set(posts.map((p) => p.packet_id))));
+  }, [markAll, posts]);
+  const unseen = markAll ? [] : posts.filter((p) => !seen.has(p.packet_id));
+  const jumpToNew = () => {
+    const first = unseen[0];
+    if (first) document.getElementById(postElementId(first.packet_id))?.scrollIntoView?.({ block: 'start' });
+    setSeen(new Set(posts.map((p) => p.packet_id)));
+  };
+
+  // >>n に乗せると、指しているレスを小窓で見せる
+  const [preview, setPreview] = useState<{ id: string; left: number; top: number; above: boolean } | null>(null);
+  const indexById = useMemo(() => new Map(posts.map((p, i) => [p.packet_id, i])), [posts]);
+  useEffect(() => {
+    if (!preview) return;
+    const hide = () => setPreview(null);
+    window.addEventListener('scroll', hide, true);
+    return () => window.removeEventListener('scroll', hide, true);
+  }, [preview]);
+  const showPreview = (e: MouseEvent<HTMLElement>, packetId: string) => {
+    const el = (e.target as HTMLElement).closest?.('[data-anchor]') as HTMLElement | null;
+    if (!el) return;
+    const n = Number(el.dataset.anchor);
+    const target = Number.isSafeInteger(n) ? resolveAnchor?.(packetId, n) : null;
+    if (!target || !indexById.has(target)) return;
+    const r = el.getBoundingClientRect();
+    const above = r.bottom > window.innerHeight * 0.6;
+    setPreview({ id: target, left: Math.max(8, r.left), top: above ? r.top - 6 : r.bottom + 6, above });
+  };
+  const hidePreview = (e: MouseEvent<HTMLElement>) => {
+    if ((e.target as HTMLElement).closest?.('[data-anchor]')) setPreview(null);
+  };
+
   // 書き込める状態か。埋まった・落ちたスレには書き込み欄を出さない (core も送信時に断る)
-  const closedNotice = state?.expired ? EXPIRED_NOTICE
-    : state?.closed ? (state.closeReason === 'bytes' ? BYTES_NOTICE : POSTS_NOTICE)
+  const closedNotice = state?.expired ? t('thread.expiredNotice')
+    : state?.closed ? (state.closeReason === 'bytes' ? t('thread.bytesNotice') : t('thread.postsNotice'))
     : null;
   const remainingPosts = THREAD_LIMITS.MAX_POSTS - (state?.visibleCount ?? 0);
   const remainingBytes = THREAD_LIMITS.MAX_CONTENT_BYTES - (state?.contentBytes ?? 0);
@@ -60,16 +124,6 @@ export default function ThreadView({
 
   log.trace(() => `ThreadView render: ${posts.length} posts`);
 
-  const formatContent = (content: string) => {
-    const sanitized = content
-      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    const withLinks = sanitized.replace(
-      /&gt;&gt;(\d+)/g,
-      '<span class="anchor" data-anchor="$1">&gt;&gt;$1</span>'
-    );
-    return withLinks;
-  };
-
   const handleBodyClick = (e: MouseEvent<HTMLElement>, packetId: string) => {
     const el = (e.target as HTMLElement).closest?.('[data-anchor]') as HTMLElement | null;
     if (!el) return;
@@ -79,10 +133,22 @@ export default function ThreadView({
     if (!target) return;
     const node = document.getElementById(postElementId(target));
     if (!node) return;
-    node.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+    node.scrollIntoView?.({ block: 'center' });
     setHighlightId(target);
     if (highlightTimer.current) clearTimeout(highlightTimer.current);
     highlightTimer.current = setTimeout(() => setHighlightId(null), 1500);
+  };
+
+  // レス番を押すと、書き込み欄の末尾にアンカー (>>番号) を足し、書き込み欄へ移る (画面は動かさない)
+  const quote = (n: number) => {
+    setReplyInput((prev) => appendAnchor(prev, n));
+    setSubmitError(null);
+    requestAnimationFrame(() => {
+      const el = replyRef.current;
+      if (!el) return;
+      el.focus({ preventScroll: true });
+      el.setSelectionRange(el.value.length, el.value.length);
+    });
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -106,7 +172,7 @@ export default function ThreadView({
     try {
       await submitReply(replyInput);
     } catch (e) {
-      setSubmitError(describeSubmitError(e, '1 レス'));
+      setSubmitError(describeSubmitError(e, t('thread.subject')));
       return;
     }
     if (!status.startsWith('🔴')) {
@@ -121,16 +187,17 @@ export default function ThreadView({
           className="btn-back"
           onClick={() => { if (confirmLeave()) navigate({ board: boardId }); }}
         >
-          ← 板に戻る
+          {t('thread.back')}
         </button>
         <h1 id="thread-title" className="page-title" style={{ marginTop: 8 }}>
-          スレッド: {threadId.substring(0, 8)}
+          {t('thread.heading', { id: threadId.substring(0, 8) })}
         </h1>
-        <div className="eyebrow" style={{ marginTop: 4 }}>板: {boardDisplayName(boardId)}</div>
+        <div className="eyebrow" style={{ marginTop: 4 }}>{t('thread.boardLabel', { name: boardDisplayName(boardId) })}</div>
+        {/* 取得の進み具合などは題名の下の 1 行に出す。★ 文が無いときも行は残す (消えてもレスの位置が動かないように) */}
+        <div id="loading-status" className="load-status" role="status" title={status || undefined}>{status}</div>
       </div>
 
       <div id="posts-container" className="stack stack-sm">
-        {status && <div id="loading-status" className="empty">{status}</div>}
 
         {posts.map((p, index) => {
           const trip = p.trip_pubkey ? '◆' + KeyManager.toBase64(KeyManager.cryptoHash(p.trip_pubkey).slice(0, 5)) : '';
@@ -141,28 +208,65 @@ export default function ThreadView({
               className={`post${highlightId === p.packet_id ? ' is-highlight' : ''}`}
               key={p.packet_id || index}
               id={postElementId(p.packet_id)}
-              style={highlightId === p.packet_id ? { outline: '2px solid var(--accent)', outlineOffset: '2px', transition: 'outline-color 0.3s' } : undefined}
+              style={highlightId === p.packet_id ? { outline: '2px solid var(--accent)', outlineOffset: '2px' } : undefined}
             >
               <div className="post-header">
-                <span className="res-no">#{index + 1}</span>
-                <span className="author-name">名無しさん {trip}</span>
+                {closedNotice ? (
+                  <span className="res-no">#{index + 1}</span>
+                ) : (
+                  <button
+                    type="button"
+                    className="res-no res-no-btn"
+                    title={t('thread.quoteTitle')}
+                    disabled={isSubmitting}
+                    onClick={() => quote(index + 1)}
+                  >
+                    #{index + 1}
+                  </button>
+                )}
+                <span className="author-name">{t('thread.anonymous', { trip })}</span>
                 <span className="author-id">ID:{id}</span>
-                <span className="post-time">{new Date(p.created_at).toLocaleString()}</span>
+                <span className="post-time">{formatDateTime(p.created_at)}</span>
               </div>
               <div
                 className="post-body"
                 onClick={e => handleBodyClick(e, p.packet_id)}
+                onMouseOver={e => showPreview(e, p.packet_id)}
+                onMouseOut={hidePreview}
               >
                 <PostBody content={p.content || ''} format={formatContent} />
               </div>
             </div>
           );
         })}
+        <div ref={endRef} aria-hidden="true" />
       </div>
+
+      {preview && (() => {
+        const i = indexById.get(preview.id);
+        const p = i === undefined ? null : posts[i];
+        if (!p || i === undefined) return null;
+        return (
+          <div
+            className="anchor-preview"
+            role="tooltip"
+            style={{ left: preview.left, top: preview.top, transform: preview.above ? 'translateY(-100%)' : undefined }}
+          >
+            <div className="post-header">
+              <span className="res-no">#{i + 1}</span>
+              <span className="author-id">ID:{posterId(p, threadId)}</span>
+              <span className="post-time">{formatDateTime(p.created_at)}</span>
+            </div>
+            <div className="post-body">
+              <PostBody content={p.content || ''} format={formatContent} />
+            </div>
+          </div>
+        );
+      })()}
 
       {(state?.hiddenCount ?? 0) > 0 && (
         <div id="hidden-note" className="alert alert-info" style={{ margin: '14px 0' }}>
-          スレッドが埋まった後や落ちた後の書き込み {state.hiddenCount} 件は表示していません。
+          {t('thread.hidden', { count: state.hiddenCount })}
         </div>
       )}
 
@@ -172,19 +276,23 @@ export default function ThreadView({
         </div>
       ) : (
       <div className="compose-box">
+        {unseen.length > 0 && (
+          <button className="new-posts" onClick={jumpToNew}>{t('thread.newPosts', { count: unseen.length })}</button>
+        )}
         {(nearPosts || nearBytes) && (
           <div id="thread-near-limit" className="alert alert-warn" style={{ marginBottom: 10 }}>
-            {nearPosts && <div>あと {remainingPosts} レスで埋まります</div>}
-            {nearBytes && <div>スレッドの残り容量: 約 {Math.max(0, Math.floor(remainingBytes / 1024))} KB</div>}
+            {nearPosts && <div>{t('thread.nearPosts', { count: remainingPosts })}</div>}
+            {nearBytes && <div>{t('thread.nearBytes', { kb: Math.max(0, Math.floor(remainingBytes / 1024)) })}</div>}
           </div>
         )}
         <textarea
           id="reply-input"
+          ref={replyRef}
           autoComplete="off"
           spellCheck={false}
           autoCorrect="off"
           autoCapitalize="off"
-          placeholder=">>レスを入力... (Ctrl+Enterで送信)"
+          placeholder={t('thread.placeholder')}
           rows={3}
           value={replyInput}
           onChange={e => { setReplyInput(e.target.value); setSubmitError(null); }}
@@ -192,14 +300,14 @@ export default function ThreadView({
           disabled={isSubmitting}
         />
         <div className="row row-between row-wrap" style={{ marginTop: 6 }}>
-          <PostLimitNote budget={budget} subject="1 レス" />
+          <PostLimitNote budget={budget} subject={t('thread.subject')} />
           <AttachControl
             disabled={isSubmitting}
-            onInsert={(t) => { setReplyInput((prev) => appendToken(prev, t)); setSubmitError(null); }}
+            onInsert={(token) => { setReplyInput((prev) => appendToken(prev, token)); setSubmitError(null); }}
           />
         </div>
         {overThread && !budget.over && (
-          <div role="alert" className="msg msg-error" style={{ marginTop: 6 }}>スレッドの残り容量を超えています</div>
+          <div role="alert" className="msg msg-error" style={{ marginTop: 6 }}>{t('thread.overThread')}</div>
         )}
         <div className="compose-foot">
           <div id="post-status" className="small muted">
@@ -211,7 +319,7 @@ export default function ThreadView({
             onClick={handleSubmit}
             disabled={isSubmitting || budget.over || overThread || !replyInput.trim()}
           >
-            書き込む
+            {t('thread.send')}
           </button>
         </div>
         {submitError && (

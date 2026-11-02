@@ -12,6 +12,8 @@ export interface TunnelTarget {
 export interface TunnelCallOptions {
   /** 応答の片が 1 つも届かないまま待つ上限 (ms)。片が届くたびに延びる */
   inactivityMs: number;
+  /** 最後の片が届いたのに途中の片が欠けているとき、待つ上限 (ms)。省略は DEFAULT_GAP_GRACE_MS */
+  gapGraceMs?: number;
   /** 受け付ける応答の大きさ (復号後の合計) と片の数の上限。超えたら失敗 */
   maxBytes: number;
   maxPieces: number;
@@ -30,12 +32,19 @@ export interface TunnelCallResult {
 const MAX_BAD_PIECES = 3;
 
 /**
+ * 最後の片が届いたのに穴があるときの猶予。穴はほぼ確実に途中で捨てられた片 (理由と長さは HISTORY_LIMITS.GAP_GRACE_MS)。
+ * inactivityMs を待たずに諦めて、呼び出し側が別の保持者へ回れるようにする。
+ */
+export const DEFAULT_GAP_GRACE_MS = 3_000;
+
+/**
  * 要求を 1 つ出して、応答 1 つ分 (全部の片が揃い、最後の片が復号した中身の final) を返す。失敗・中止は data = null。
  * 経路の ERROR (BUSY など) は error に載せる: 呼び出し側は「制限に当たった」(待てばよい) と「届かない」(別の保持者へ) を分けられる。
  *
  * ★ HistoryClient.requestOnce と同じ規則 (大容量ファイルの預け入れ・取得で使い回す):
  *   - フレームの final (平文) ではなく、**復号した中身の final** を使う。途中の片を黙って落とされても完結と見なさない。
  *   - 片の番号の重複・final より後ろの片・合計の大きさの超過は失敗。
+ *   - 最後の片が届いたのに穴があれば、短い猶予 (gapGraceMs) で諦める (HISTORY_LIMITS.GAP_GRACE_MS と同じ理由)。
  *   - respKey は要求ごとの乱数で、使い終えたら消す。
  */
 export function callTunnel(
@@ -72,7 +81,7 @@ export function callTunnel(
     opts.signal?.addEventListener('abort', onAbort, { once: true });
     const arm = () => {
       if (timer) clearTimeout(timer);
-      timer = setTimeout(() => end(null), opts.inactivityMs);
+      timer = setTimeout(() => end(null), finalSeq >= 0 ? (opts.gapGraceMs ?? DEFAULT_GAP_GRACE_MS) : opts.inactivityMs);
     };
 
     handle = client.request({ gateway: target.gateway, tunnelId: target.tunnelId, body: sealed }, (ev) => {

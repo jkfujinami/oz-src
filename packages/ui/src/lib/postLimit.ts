@@ -1,4 +1,5 @@
 import { POW_POLICY, ThreadClosedError, createLogger } from '@oz/core';
+import { t } from '../i18n';
 
 const log = createLogger('ui.postLimit');
 
@@ -40,8 +41,8 @@ export function byteBudget(text: string): ByteBudget {
 
 /** 残りバイトの表示文言。例: 「残り 1,234 バイト」 */
 export function remainingLabel(budget: ByteBudget): string {
-  if (budget.over) return `上限を ${(-budget.remaining).toLocaleString('ja-JP')} バイト超えています`;
-  return `残り ${budget.remaining.toLocaleString('ja-JP')} バイト`;
+  if (budget.over) return t('postLimit.over', { n: (-budget.remaining).toLocaleString('ja-JP') });
+  return t('postLimit.remaining', { n: budget.remaining.toLocaleString('ja-JP') });
 }
 
 /**
@@ -52,9 +53,9 @@ export function describeSubmitError(err: unknown, subject: string): string {
   log.error('submit failed:', err);
   if (err instanceof ThreadClosedError) return describeThreadClosed(err.reason);
   if (err instanceof RangeError) {
-    return `${subject}は ${MAX_POST_BYTES} バイトまでです。送信されていません。内容は残してあります。`;
+    return t('postLimit.tooLong', { subject, max: MAX_POST_BYTES });
   }
-  return '送信できませんでした。内容は残してあります。少し待ってから、もう一度お試しください。';
+  return t('postLimit.failed');
 }
 
 /** スレッドに書けないときの文言 (ThreadClosedError の理由ごと) */
@@ -62,10 +63,10 @@ export function describeThreadClosed(reason: ThreadClosedError['reason']): strin
   switch (reason) {
     case 'closed':
     case 'full-posts':
-      return 'このスレッドは上限に達したので、書き込めませんでした。内容は残してあります。新しいスレッドを立ててください。';
+      return t('postLimit.closed');
     case 'full-bytes':
-      return 'この書き込みを足すと、スレッドの容量の上限を超えます。送信されていません。内容を短くするか、新しいスレッドに書いてください。';
+      return t('postLimit.fullBytes');
     case 'expired':
-      return 'このスレッドは落ちているので、書き込めませんでした。内容は残してあります。';
+      return t('postLimit.expired');
   }
 }

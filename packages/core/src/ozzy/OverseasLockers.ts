@@ -59,7 +59,10 @@ export type OverseasLockerId =
   | 'pomf-quax'
   | 'pomf-uguu'
   | 'gofile'
-  | 'pixeldrain';
+  | 'pixeldrain'
+  | 'x0.at'
+  | 'anonhost'
+  | 'tmpfile';
 
 export interface UploadedLockerSlabReceipt {
   readonly lockerId: OverseasLockerId;
@@ -445,18 +448,23 @@ export class LitterboxLockerAdapter implements OverseasLockerAdapter {
 //    - `x0.at` の拡張子フィルタを透過するため `.txt` 名でバイナリ投入し、`206 Partial Content` で切り出す
 // ============================================================================
 export class ZeroXZeroLockerAdapter implements OverseasLockerAdapter {
-  readonly lockerId: OverseasLockerId = '0x0.st';
+  readonly lockerId: OverseasLockerId;
   readonly maxSlabBytes = 512 * 1024 * 1024; // 512 MiB
   readonly supportsExplicitDelete = true;
   private readonly endpoints: readonly string[];
   private readonly expiresHours: number;
 
+  /**
+   * ★ `lockerId: 'x0.at'` は x0.at だけに置く (別の運営者へ黙って切り替えない)。シェアを散らす単位はロッカー = 運営者なので、
+   *   切り替えると「別々のロッカーに置いた」つもりのシェアが 1 つの運営者に集まる。'0x0.st' (旧) は 0x0.st → x0.at の順。
+   */
   constructor(
     private readonly transport: HttpTransportFn,
-    opts?: { endpoint?: string; fallbackEndpoints?: readonly string[]; expiresHours?: number },
+    opts?: { lockerId?: '0x0.st' | 'x0.at'; endpoint?: string; fallbackEndpoints?: readonly string[]; expiresHours?: number },
   ) {
-    const primary = opts?.endpoint ?? 'https://0x0.st';
-    const fallbacks = opts?.fallbackEndpoints ?? ['https://x0.at'];
+    this.lockerId = opts?.lockerId ?? '0x0.st';
+    const primary = opts?.endpoint ?? (this.lockerId === 'x0.at' ? 'https://x0.at' : 'https://0x0.st');
+    const fallbacks = opts?.fallbackEndpoints ?? (this.lockerId === 'x0.at' ? [] : ['https://x0.at']);
     this.endpoints = [primary, ...fallbacks.filter(e => e !== primary)];
     this.expiresHours = opts?.expiresHours ?? 720; // 30 days
   }
@@ -468,9 +476,7 @@ export class ZeroXZeroLockerAdapter implements OverseasLockerAdapter {
 
     let lastStatus = 0;
     for (const ep of this.endpoints) {
-      // x0.at 等の nullpointer 派生サーバは `.bin` 拡張子を拒否するため `.txt` を付与して生バイナリを格納する
-      const normalizedName =
-        ep.includes('x0.at') && !slabFilename.endsWith('.txt') ? `${slabFilename}.txt` : slabFilename;
+      // ★ 拡張子は付け替えない (x0.at は 2026-10 の実地テストで .bin をそのまま受け付けた)。運営者の制限をすり抜ける細工はしない
       const mp = buildMultipartFormData(
         [
           { name: 'expires', value: this.expiresHours.toString() },
@@ -478,18 +484,16 @@ export class ZeroXZeroLockerAdapter implements OverseasLockerAdapter {
         ],
         {
           fieldName: 'file',
-          fileName: normalizedName,
+          fileName: slabFilename,
           data: slabBinary,
         },
       );
 
       try {
+        // ★ 独自の User-Agent は付けない (Ozzy の通信だと名乗ると、ロッカーや途中の網が UA だけで弾ける)
         const req = new Request(ep, {
           method: 'POST',
-          headers: {
-            'Content-Type': mp.contentType,
-            'User-Agent': 'ozzy-slab-client/2.0',
-          },
+          headers: { 'Content-Type': mp.contentType },
           body: mp.body as Uint8Array<ArrayBuffer>,
         });
         const res = await this.transport(req);
@@ -503,7 +507,7 @@ export class ZeroXZeroLockerAdapter implements OverseasLockerAdapter {
         const slabId = parts[parts.length - 1];
 
         return {
-          lockerId: '0x0.st',
+          lockerId: this.lockerId,
           slabId,
           downloadUrl,
           deleteToken,
@@ -521,9 +525,7 @@ export class ZeroXZeroLockerAdapter implements OverseasLockerAdapter {
   async fetchSlabRange(
     downloadUrl: string, startByte: number, endByte: number, _authToken?: string, signal?: AbortSignal,
   ): Promise<Uint8Array | null> {
-    return executeRangeFetch(this.transport, downloadUrl, startByte, endByte, {
-      'User-Agent': 'ozzy-slab-client/2.0',
-    }, signal);
+    return executeRangeFetch(this.transport, downloadUrl, startByte, endByte, undefined, signal);
   }
 
   async deleteSlab(receipt: UploadedLockerSlabReceipt): Promise<boolean> {
@@ -535,10 +537,7 @@ export class ZeroXZeroLockerAdapter implements OverseasLockerAdapter {
     ]);
     const req = new Request(receipt.downloadUrl, {
       method: 'POST',
-      headers: {
-        'Content-Type': mp.contentType,
-        'User-Agent': 'ozzy-slab-client/2.0',
-      },
+      headers: { 'Content-Type': mp.contentType },
       body: mp.body as Uint8Array<ArrayBuffer>,
     });
     const res = await this.transport(req);
@@ -647,6 +646,120 @@ export class PomfLockerAdapter implements OverseasLockerAdapter {
     });
     const res = await this.transport(req);
     return res.status === 200 || res.status === 204;
+  }
+}
+
+// ============================================================================
+// 4b. anonhost.cc (`POST https://anonhost.cc/api/upload` — field `file`)
+//    - アカウント不要・1 ファイル 1GB・14 日で自動削除。削除は `DELETE /api/media/{id}?token=...`
+//    - 応答の `url` は HTML のページ。生のファイルは `https://r2.anonhost.cc/{id}{拡張子}` (2026-10 の実地テストで Range 206)
+// ============================================================================
+export class AnonhostLockerAdapter implements OverseasLockerAdapter {
+  readonly lockerId: OverseasLockerId = 'anonhost';
+  readonly maxSlabBytes = 1000 * 1024 * 1024;
+  readonly supportsExplicitDelete = true;
+  private readonly apiBase: string;
+  private readonly rawBase: string;
+
+  constructor(private readonly transport: HttpTransportFn, opts?: { apiBase?: string; rawBase?: string }) {
+    this.apiBase = (opts?.apiBase ?? 'https://anonhost.cc').replace(/\/+$/, '');
+    this.rawBase = (opts?.rawBase ?? 'https://r2.anonhost.cc').replace(/\/+$/, '');
+  }
+
+  async uploadSlab(slabBinary: Uint8Array, slabFilename: string): Promise<UploadedLockerSlabReceipt> {
+    if (slabBinary.byteLength > this.maxSlabBytes) throw new RangeError(`anonhost max Slab size is ${this.maxSlabBytes} bytes`);
+    const mp = buildMultipartFormData([], { fieldName: 'file', fileName: slabFilename, data: slabBinary });
+    const res = await this.transport(new Request(`${this.apiBase}/api/upload`, {
+      method: 'POST',
+      headers: { 'Content-Type': mp.contentType, Accept: 'application/json' },
+      body: mp.body as Uint8Array<ArrayBuffer>,
+    }));
+    if (!res.ok) throw new Error(`anonhost upload failed with HTTP ${res.status}`);
+    const json = (await res.json()) as { id?: unknown; deletion_url?: unknown };
+    const id = typeof json.id === 'string' ? json.id : '';
+    if (!/^[A-Za-z0-9_-]{4,64}$/.test(id)) throw new Error('anonhost returned no file id');
+    const dot = slabFilename.lastIndexOf('.');
+    const ext = dot > 0 ? slabFilename.slice(dot) : '';
+    let deleteToken = '';
+    if (typeof json.deletion_url === 'string') {
+      try {
+        deleteToken = new URL(json.deletion_url).searchParams.get('token') ?? '';
+      } catch {
+        deleteToken = '';
+      }
+    }
+    return {
+      lockerId: this.lockerId,
+      slabId: id,
+      downloadUrl: `${this.rawBase}/${id}${ext}`,
+      deleteToken,
+      byteLength: slabBinary.byteLength,
+      expiresAtSec: Math.floor(Date.now() / 1000) + 14 * 24 * 3600,
+    };
+  }
+
+  async fetchSlabRange(
+    downloadUrl: string, startByte: number, endByte: number, _authToken?: string, signal?: AbortSignal,
+  ): Promise<Uint8Array | null> {
+    return executeRangeFetch(this.transport, downloadUrl, startByte, endByte, undefined, signal);
+  }
+
+  async deleteSlab(receipt: UploadedLockerSlabReceipt): Promise<boolean> {
+    if (!receipt.deleteToken) return true; // 14 日で消える
+    // ★ 削除先は受け取り票の URL ではなく、自分で組み立てる (任意の URL へ DELETE させない)
+    if (!/^[A-Za-z0-9_-]{4,64}$/.test(receipt.slabId)) return false;
+    const url = `${this.apiBase}/api/media/${receipt.slabId}?token=${encodeURIComponent(receipt.deleteToken)}`;
+    const res = await this.transport(new Request(url, { method: 'DELETE' }));
+    return res.ok;
+  }
+}
+
+// ============================================================================
+// 4c. tmpfile.link (`POST https://tmpfile.link/api/upload` — field `file`)
+//    - アカウント不要・1 ファイル 100MB・7 日で自動削除。削除の API は無い
+//    - 応答の `downloadLink` が生のファイル (`https://*.tempfilestorage.link/public/...`。2026-10 の実地テストで Range 206)
+// ============================================================================
+export class TmpfileLockerAdapter implements OverseasLockerAdapter {
+  readonly lockerId: OverseasLockerId = 'tmpfile';
+  readonly maxSlabBytes = 100 * 1024 * 1024;
+  readonly supportsExplicitDelete = false;
+  private readonly apiUrl: string;
+
+  constructor(private readonly transport: HttpTransportFn, opts?: { apiUrl?: string }) {
+    this.apiUrl = opts?.apiUrl ?? 'https://tmpfile.link/api/upload';
+  }
+
+  async uploadSlab(slabBinary: Uint8Array, slabFilename: string): Promise<UploadedLockerSlabReceipt> {
+    if (slabBinary.byteLength > this.maxSlabBytes) throw new RangeError(`tmpfile max Slab size is ${this.maxSlabBytes} bytes`);
+    const mp = buildMultipartFormData([], { fieldName: 'file', fileName: slabFilename, data: slabBinary });
+    const res = await this.transport(new Request(this.apiUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': mp.contentType, Accept: 'application/json' },
+      body: mp.body as Uint8Array<ArrayBuffer>,
+    }));
+    if (!res.ok) throw new Error(`tmpfile upload failed with HTTP ${res.status}`);
+    const json = (await res.json()) as { downloadLink?: unknown };
+    const downloadUrl = typeof json.downloadLink === 'string' ? json.downloadLink : '';
+    if (!downloadUrl.startsWith('https://')) throw new Error('tmpfile returned no download link');
+    const parts = downloadUrl.split('/');
+    return {
+      lockerId: this.lockerId,
+      slabId: parts[parts.length - 2] ?? parts[parts.length - 1],
+      downloadUrl,
+      deleteToken: '',
+      byteLength: slabBinary.byteLength,
+      expiresAtSec: Math.floor(Date.now() / 1000) + 7 * 24 * 3600,
+    };
+  }
+
+  async fetchSlabRange(
+    downloadUrl: string, startByte: number, endByte: number, _authToken?: string, signal?: AbortSignal,
+  ): Promise<Uint8Array | null> {
+    return executeRangeFetch(this.transport, downloadUrl, startByte, endByte, undefined, signal);
+  }
+
+  async deleteSlab(): Promise<boolean> {
+    return true; // 7 日で消える
   }
 }
 
@@ -1313,8 +1426,8 @@ export class MemoryOverseasLockerCluster {
 
     // 6. 0x0.st & x0.at Upload & Token Delete (`POST https://0x0.st` / `POST https://x0.at`)
     if ((host === '0x0.st' || host === 'x0.at') && request.method === 'POST') {
-      const ua = request.headers.get('User-Agent') ?? '';
-      if (!ua) return new Response('Missing User-Agent', { status: 403 });
+      // ★ User-Agent は見ない: 送る側の HTTP の実装 (ブラウザ・Node・Electron) が送る直前に付けるので、Request のヘッダには現れない
+      //   (アダプタは独自の User-Agent を付けない)
       const ct = request.headers.get('Content-Type') ?? '';
       const raw = new Uint8Array(await request.arrayBuffer());
       if (url.pathname !== '/' && url.pathname !== '') {
@@ -1370,6 +1483,61 @@ export class MemoryOverseasLockerCluster {
         }),
         { status: 200, headers: { 'Content-Type': 'application/json' } },
       );
+    }
+
+    // 7b. anonhost.cc Upload (`POST https://anonhost.cc/api/upload`) & Delete (`DELETE https://anonhost.cc/api/media/:id?token=`)
+    //     生のファイルは `https://r2.anonhost.cc/{id}{拡張子}` (アダプタが組み立てる)
+    if (host === 'anonhost.cc' && url.pathname === '/api/upload' && request.method === 'POST') {
+      const ct = request.headers.get('Content-Type') ?? '';
+      const raw = new Uint8Array(await request.arrayBuffer());
+      const bin = extractBinaryFromMultipart(raw, ct);
+      if (!bin) return new Response('Bad Multipart', { status: 400 });
+      const m = /filename="([^"]*)"/.exec(new TextDecoder().decode(raw.subarray(0, Math.min(raw.length, 1024))));
+      const name = m?.[1] ?? '';
+      const dot = name.lastIndexOf('.');
+      const ext = dot > 0 ? name.slice(dot) : '';
+      const id = `ah${++this.seq}x`;
+      const token = `ahtok${this.seq}`;
+      this.files.set(`https://r2.anonhost.cc/${id}${ext}`, {
+        data: bin,
+        deleteToken: token,
+        lockerHost: 'r2.anonhost.cc',
+        expiresAtMs: nowMs + 14 * 86_400_000,
+      });
+      return new Response(JSON.stringify({
+        id, url: `https://anonhost.cc/${id}`, filename: name, size: bin.byteLength,
+        deletion_url: `https://anonhost.cc/api/media/${id}?token=${token}`,
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }
+    if (host === 'anonhost.cc' && url.pathname.startsWith('/api/media/') && request.method === 'DELETE') {
+      const id = url.pathname.slice('/api/media/'.length);
+      const token = url.searchParams.get('token') ?? '';
+      for (const [key, entry] of this.files) {
+        if (key.startsWith(`https://r2.anonhost.cc/${id}`) && entry.deleteToken === token) {
+          this.files.delete(key);
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+      }
+      return new Response('Not Found', { status: 404 });
+    }
+
+    // 7c. tmpfile.link Upload (`POST https://tmpfile.link/api/upload`)。生のファイルは `https://zip*.tempfilestorage.link/public/...`
+    if (host === 'tmpfile.link' && url.pathname === '/api/upload' && request.method === 'POST') {
+      const ct = request.headers.get('Content-Type') ?? '';
+      const raw = new Uint8Array(await request.arrayBuffer());
+      const bin = extractBinaryFromMultipart(raw, ct);
+      if (!bin) return new Response('Bad Multipart', { status: 400 });
+      const n = ++this.seq;
+      const downloadLink = `https://zip${(n % 3) + 1}.tempfilestorage.link/public/2026-10-29/tf${n}/slab.bin`;
+      this.files.set(downloadLink, {
+        data: bin,
+        deleteToken: '',
+        lockerHost: new URL(downloadLink).hostname,
+        expiresAtMs: nowMs + 7 * 86_400_000,
+      });
+      return new Response(JSON.stringify({ downloadLink, fileName: 'slab.bin', size: bin.byteLength, type: 'application/octet-stream' }), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      });
     }
 
     // 8. Pixeldrain Upload (`PUT https://pixeldrain.com/api/file/:name`) & Delete (`DELETE https://pixeldrain.com/api/file/:id`)
@@ -1501,6 +1669,8 @@ export class GenericLockerSlabStagingMixer {
       readonly maxWaitMs?: number;
       readonly verify?: SlabUploadVerifier | null;
       readonly onSlabFlushed?: (res: GenericFlushedSlabResult) => void;
+      /** 1 つのロッカーへの置き場所の試みが失敗した (次の候補へ回る。画面の進み具合の表示用) */
+      readonly onAttemptFailed?: (lockerId: OverseasLockerId, error: unknown) => void;
     },
   ) {
     this.chunkBytes = opts.chunkBytes ?? OZZY_CHUNK_BYTES;
@@ -1617,12 +1787,14 @@ export class GenericLockerSlabStagingMixer {
             // ★ 置いたと言うだけの受け取り票 (M1 の嘘・ロッカーの取りこぼし) は、確かめて弾く
             if (this.opts.verify && !(await this.opts.verify(r, chunkMap))) {
               lastErr = new Error(`${candidate.lockerId}: uploaded Slab could not be verified`);
+              this.opts.onAttemptFailed?.(candidate.lockerId, lastErr);
               continue;
             }
             receipt = r;
             break;
           } catch (err) {
             lastErr = err;
+            this.opts.onAttemptFailed?.(candidate.lockerId, err);
           }
         }
       } finally {
@@ -1657,6 +1829,15 @@ export class GenericLockerSlabStagingMixer {
 //     - 置き場所は Manifest に入れ、Manifest は P2P のファイル保管に置く (共通のディレクトリ・Worker を使わない)
 //     - 置くときは OnionLockerAdapter (回路の M1 に頼む)、取るときは P2P メッシュの取得役 (SlabReader + MeshRange)
 // ============================================================================
+
+/**
+ * アップロード中の Slab ごとの出来事 (画面の進み具合の表示用)。
+ * intended = 振り分けたロッカー。placed の lockerId が intended と違えば、失敗して別のロッカーへ回したもの。
+ * ★ 受け取り票 (置いた Slab の URL・削除トークン) は入れない (画面に出すだけの情報に、ファイルへの手がかりを混ぜない)。
+ */
+export type OzzySlabEvent =
+  | { kind: 'placed'; stripe: number; intended: OverseasLockerId; lockerId: OverseasLockerId; shares: number }
+  | { kind: 'failed'; stripe: number; intended: OverseasLockerId; lockerId: OverseasLockerId; error: string };
 
 /** 1 ストライプで置けたシェアがこれ未満なら、アップロードを失敗にする (16 で復元できるが、余裕が無いと 1 つの消失で読めなくなる) */
 export const OZZY_MIN_COMMITTED_SHARES = OZZY_RS_K + 4;
@@ -1754,6 +1935,7 @@ export class OverseasMultiLockerCoordinator {
     stripeIndex: number,
     stripeSeed: Uint8Array,
     dropShareIndices?: ReadonlySet<number>,
+    onSlab?: (e: OzzySlabEvent) => void,
   ): Promise<{
     locations: OzzySlabLocation[];
     receipts: UploadedLockerSlabReceipt[];
@@ -1788,6 +1970,10 @@ export class OverseasMultiLockerCoordinator {
             receipts.push(res.receipt);
             locations.push(res.location);
             committedShares += res.chunkMap.length;
+            onSlab?.({ kind: 'placed', stripe: stripeIndex, intended: adapter.lockerId, lockerId: res.receipt.lockerId, shares: res.chunkMap.length });
+          },
+          onAttemptFailed: (lockerId, error) => {
+            onSlab?.({ kind: 'failed', stripe: stripeIndex, intended: adapter.lockerId, lockerId, error: error instanceof Error ? error.message : String(error) });
           },
         }),
     );
@@ -1821,6 +2007,8 @@ export class OverseasMultiLockerCoordinator {
     dropShareIndices?: ReadonlySet<number>;
     stripeConcurrency?: number;
     onProgress?: (completedStripes: number, totalStripes: number) => void;
+    /** Slab をロッカーに置いた・置けなかった (次の候補へ回した) たびに呼ぶ (画面の進み具合の表示用) */
+    onSlab?: (e: OzzySlabEvent) => void;
     signal?: AbortSignal;
   }): Promise<{
     linkText: string;
@@ -1858,7 +2046,7 @@ export class OverseasMultiLockerCoordinator {
         const s = next.index;
         const stripeSeed = await deriveStripeSeed(fileSeed, s);
         try {
-          const res = await this.uploadStripeAcrossLockers(next.data, s, stripeSeed, params.dropShareIndices);
+          const res = await this.uploadStripeAcrossLockers(next.data, s, stripeSeed, params.dropShareIndices, params.onSlab);
           allReceipts.push(...res.receipts);
           stripes[s] = { stripeSeed, shareDigests: res.shareDigests, locations: res.locations };
           params.onProgress?.(++completed, stripeCount + 1);
@@ -1941,7 +2129,7 @@ export function createLockerRangeFetch(
   const zeroX = new ZeroXZeroLockerAdapter(transport);
   return async (lockerId, url, start, end, signal) => {
     if (lockerId === 'gofile') return gofile.fetchSlabRange(url, start, end, undefined, signal);
-    if (lockerId === '0x0.st') return zeroX.fetchSlabRange(url, start, end, undefined, signal);
+    if (lockerId === '0x0.st' || lockerId === 'x0.at') return zeroX.fetchSlabRange(url, start, end, undefined, signal);
     return http(lockerId, url, start, end, signal);
   };
 }

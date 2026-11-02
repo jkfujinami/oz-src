@@ -3,6 +3,7 @@ import { FileTransferError, type UploadProgress } from '@oz/core';
 import { useP2P } from '../providers/P2PProvider';
 import { formatBytes, maxFileBytes } from '../lib/fileLimits';
 import { beginTransfer } from '../lib/transferGuard';
+import { t, useT } from '../i18n';
 
 type Upload =
   | { kind: 'idle' }
@@ -12,13 +13,18 @@ type Upload =
 function describeUploadError(e: unknown): string {
   if (e instanceof FileTransferError) {
     switch (e.code) {
-      case 'no-first-hop': return 'まだ網につながっていません。少し待ってから、もう一度お試しください。';
-      case 'no-holders':
-      case 'insufficient-replicas': return '預け先が足りず、置ききれませんでした。少し待ってから、もう一度お試しください。';
-      default: return 'アップロードに失敗しました。もう一度お試しください。';
+      case 'no-first-hop': return t('attach.noFirstHop');
+      case 'no-holders': return t('attach.noHolders');
+      case 'insufficient-replicas': {
+        // ★ ファイルの大きさではなく、別々の保持者 (自分以外・応答のあるもの) の数で決まる
+        const r = e.replicas;
+        const counts = r ? ` ${t('attach.counts', { needed: r.needed, placed: r.placed })}` : '';
+        return t('attach.insufficientReplicas', { counts });
+      }
+      default: return t('attach.failed');
     }
   }
-  return 'アップロードに失敗しました。もう一度お試しください。';
+  return t('attach.failed');
 }
 
 /**
@@ -28,6 +34,7 @@ function describeUploadError(e: unknown): string {
  * ★ 状態はこのコンポーネントのメモリだけ。保存しない。外れる (閉じる) と中止する。
  */
 export function AttachControl({ onInsert, disabled }: { onInsert: (token: string) => void; disabled?: boolean }) {
+  const t = useT();
   const { node } = useP2P();
   const [state, setState] = useState<Upload>({ kind: 'idle' });
   const inputRef = useRef<HTMLInputElement>(null);
@@ -47,10 +54,10 @@ export function AttachControl({ onInsert, disabled }: { onInsert: (token: string
   }, []);
 
   const start = (file: File) => {
-    if (!node) { setState({ kind: 'error', message: '準備ができていません。' }); return; }
-    if (file.size < 1) { setState({ kind: 'error', message: '空のファイルは添付できません。' }); return; }
+    if (!node) { setState({ kind: 'error', message: t('attach.notReady') }); return; }
+    if (file.size < 1) { setState({ kind: 'error', message: t('attach.empty') }); return; }
     if (file.size > limit) {
-      setState({ kind: 'error', message: `大きすぎます (${formatBytes(file.size)})。上限は ${formatBytes(limit)} です。` });
+      setState({ kind: 'error', message: t('attach.tooBig', { size: formatBytes(file.size), limit: formatBytes(limit) }) });
       return;
     }
     const end = beginTransfer();
@@ -62,7 +69,7 @@ export function AttachControl({ onInsert, disabled }: { onInsert: (token: string
       });
     } catch {
       end();
-      setState({ kind: 'error', message: 'アップロードを始められませんでした。' });
+      setState({ kind: 'error', message: t('attach.startFailed') });
       return;
     }
     handleRef.current = upload;
@@ -87,15 +94,15 @@ export function AttachControl({ onInsert, disabled }: { onInsert: (token: string
 
   const running = state.kind === 'running' ? state : null;
   const percent = running ? Math.min(100, Math.floor((running.placed / running.size) * 100)) : 0;
-  const phaseText = !running ? '' : running.paused ? '一時停止中'
-    : running.placed === 0 && running.phase === 'chunks' ? '暗号化中' : '保管先へ送信中';
+  const phaseText = !running ? '' : running.paused ? t('attach.paused')
+    : running.placed === 0 && running.phase === 'chunks' ? t('attach.encrypting') : t('attach.sending');
 
   return (
     <div>
       <input
         ref={inputRef}
         type="file"
-        aria-label="添付するファイル"
+        aria-label={t('attach.inputLabel')}
         data-testid="attach-input"
         style={{ display: 'none' }}
         onChange={(e) => {
@@ -110,11 +117,11 @@ export function AttachControl({ onInsert, disabled }: { onInsert: (token: string
         style={{ fontSize: '12px' }}
         disabled={disabled || !!running}
         onClick={() => inputRef.current?.click()}
-        aria-label={`ファイルを添付 (1 つ、${formatBytes(limit)} まで)`}
+        aria-label={t('attach.buttonLabel', { limit: formatBytes(limit) })}
       >
-        添付
+        {t('attach.button')}
       </button>
-      <span style={{ marginLeft: '8px', fontSize: '11px', color: 'var(--text-dim)' }}>1 つ・{formatBytes(limit)} まで</span>
+      <span style={{ marginLeft: '8px', fontSize: '11px', color: 'var(--text-dim)' }}>{t('attach.limitNote', { limit: formatBytes(limit) })}</span>
 
       {state.kind === 'error' && (
         <div role="alert" style={{ marginTop: '6px', fontSize: '12px', color: 'var(--danger)' }}>{state.message}</div>
@@ -128,7 +135,7 @@ export function AttachControl({ onInsert, disabled }: { onInsert: (token: string
           </div>
           <div
             role="progressbar"
-            aria-label="アップロードの進み具合"
+            aria-label={t('attach.progressLabel')}
             aria-valuemin={0}
             aria-valuemax={100}
             aria-valuenow={percent}
@@ -144,18 +151,18 @@ export function AttachControl({ onInsert, disabled }: { onInsert: (token: string
                 <button type="button" className="btn" style={{ fontSize: '11px' }} onClick={() => {
                   handleRef.current?.resume();
                   setState((s) => s.kind === 'running' ? { ...s, paused: false } : s);
-                }}>再開</button>
+                }}>{t('attach.resume')}</button>
               ) : (
                 <button type="button" className="btn" style={{ fontSize: '11px' }} onClick={() => {
                   handleRef.current?.pause();
                   setState((s) => s.kind === 'running' ? { ...s, paused: true } : s);
-                }}>一時停止</button>
+                }}>{t('attach.pause')}</button>
               )}
-              <button type="button" className="btn" style={{ fontSize: '11px' }} onClick={() => handleRef.current?.cancel()}>中止</button>
+              <button type="button" className="btn" style={{ fontSize: '11px' }} onClick={() => handleRef.current?.cancel()}>{t('attach.cancel')}</button>
             </span>
           </div>
           <div style={{ marginTop: '8px', color: 'var(--text-dim)', fontSize: '11px' }}>
-            アップロードした時刻と大きさは、最初の中継先とプロバイダから見えます。置き終えてから数分あけて書き込むと、投稿と結び付けられにくくなります。
+            {t('attach.timingNote')}
           </div>
         </div>
       )}

@@ -191,7 +191,7 @@ describe('トンネル + HistoryClient: 複数ノードでの端から端まで'
     expect(net.r1.received).toHaveLength(0);
   });
 
-  it('★hedged request: 速いと記録された 2 台が黙っていると、待ち時間のあと 3 台目へ回って完了する。完了した保持者の速さが記録される', async () => {
+  it('★hedged request: 速いと記録された 2 台が黙っていると、待ち時間のあと 3 台目へ回り、「全部です」を 2 台 (3・4 台目) から集めて完了する。完了した保持者の速さが記録される', async () => {
     await build({ data: ['h1a', 'h1b', 'h2a', 'h2b'] });
     const { r1, h1a, h1b, h2a, h2b } = net;
     // 速い順 (記録): h2a, h2b (どちらも黙らせる) → h1a → h1b
@@ -204,11 +204,12 @@ describe('トンネル + HistoryClient: 複数ノードでの端から端まで'
     const res = await r1.history.fetchBucket(BIRTH_DAY, TAG, { since: 0 });
     const took = performance.now() - t0;
     expect(res).toMatchObject({ completed: true, packets: COUNT });
-    expect(res.attempts).toBe(3); // 2 台 + hedge の 1 台
+    expect(res.attempts).toBe(4); // 黙った 2 台 + hedge の 1 台 + 2 台目の「全部です」を集める 1 台
     expect(took).toBeGreaterThanOrEqual(140); // hedgeMs = 150
     expect(took).toBeLessThan(1500); // 黙った保持者の inactivity (2s) を待たない
     expect(h2a.storage.tunnel!.stats.served + h2b.storage.tunnel!.stats.served).toBe(0);
     expect(h1a.storage.tunnel!.stats.served).toBe(1);
+    expect(h1b.storage.tunnel!.stats.served).toBe(1);
     // 完了した保持者の速さは実測に更新される (移動平均で、記録した 400 より速くなる)
     expect(r1.history.speedOf(h1a.sid)!).toBeLessThan(400);
     // 完了後は他の要求を打ち切っている (経路の状態は残っても 60 秒で消える)

@@ -37,7 +37,7 @@ describe('Electron preload', () => {
   it('レンダラーへ公開するのは electronAPI だけで、ipcRenderer そのものは渡さない', () => {
     expect(Object.keys(exposed)).toEqual(['electronAPI']);
     const api = exposed.electronAPI;
-    expect(Object.keys(api).sort()).toEqual(['clearCaches', 'guard', 'isElectron', 'onCommand', 'platform', 'wipeDeviceData']);
+    expect(Object.keys(api).sort()).toEqual(['clearCaches', 'guard', 'isElectron', 'onCommand', 'ozzyDirect', 'platform', 'wipeDeviceData']);
     expect(Object.keys(api.guard).sort()).toEqual(['disable', 'enable', 'get', 'onStatus', 'setOpenAtLogin', 'setTrackerUrl']);
     for (const v of [...Object.values(api), ...Object.values(api.guard)]) {
       expect(v).not.toHaveProperty('send');

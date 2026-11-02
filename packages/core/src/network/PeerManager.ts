@@ -93,6 +93,18 @@ const RATE_CATEGORY: Record<Exclude<WireType, WireType.UNKNOWN>, string> = {
 const PRE_HANDSHAKE_TYPES = new Set<WireType>([WireType.HELLO, WireType.JOIN]);
 
 /**
+ * 握手の途中 (こちらがまだ相手の JOIN を検証していない) に届いた、握手以外のフレームを取っておく上限 (相手ごと)。
+ * ★ 握手は片道ずつ終わる: 相手は先にこちらを検証済みにすると、すぐに要求 (LEASESET_SYNC_REQ・CATCHUP_REQ) や
+ *   flood (LEASESET・GOSSIP) を送ってくる。ここで捨てると、その要求も flood も二度と来ない
+ *   (エミュレーターで、後から参加した端末が参加の前後に出された leaseSet を知らないままになった)。
+ *   検証が済むまでは一切処理せず、済んだら届いた順に処理する。握手が失敗した・切れたら捨てる。
+ * ★ 一度に 1 往復ぶんのフレームが入れば足りる。握手待ちの接続の数に上限があるので、合計も頭打ち
+ *   (Guard 役でも 64 本 × 64KiB = 4MiB)。
+ */
+const PRE_VERIFY_MAX_FRAMES = 32;
+const PRE_VERIFY_MAX_BYTES = 64 * 1024;
+
+/**
  * WireType ごとのフレーム長の上限 (bytes)。デコードの前に確かめる。
  *
  * レート制限は件数しか数えないので、1 件を巨大にすると (再組み立ての上限 1MB)
@@ -242,8 +254,12 @@ export class PeerManager implements IPeerManager {
   private backboneMissingSince = new Map<PeerId, number>();
   /** 待ち受け Guard への再接続の予定 (peerId → 次に試してよい時刻と、今の間隔) */
   private guardDial = new Map<PeerId, { nextAt: number; delay: number }>();
-  private readonly maxDegreeLimit: number;
+  private maxDegreeLimit: number;
   private readonly maxPendingPeers: number;
+  /** 握手の途中に届いた、握手以外のフレーム (検証が済んだら処理する。PRE_VERIFY_MAX_*) */
+  private preVerify = new Map<PeerId, { conn: WebRTCPeer; frames: Array<{ type: WireType; payload: any; data: Uint8Array | string }>; bytes: number }>();
+  /** 握手の途中で、取っておく上限を超えて捨てたフレームの数 (診断用) */
+  public preVerifyDropped = 0;
   /** 握手待ち (未検証) の接続の出所と開始時刻。検証済み・切断で消す */
   private pendingMeta = new Map<PeerId, { source: string; startedAt: number; reserved: boolean }>();
   private readonly keepTrackerAttached: boolean;
@@ -459,6 +475,7 @@ export class PeerManager implements IPeerManager {
       `[PeerManager] Peer ${peerId.substring(0, 8)} verified (bound position: ${peer.position.toFixed(6)})`,
     );
     this.emit('peer:verified', peer);
+    this.flushPreVerify(peerId);
 
     // 次数の調整は「検証が済んだ後」にだけ行う (未認証の offer で既存リンクを追い出させない)。
     // 出所の区分 (getStats) を求めてから行う。取れなくても 'unknown' として進む。
@@ -643,6 +660,22 @@ export class PeerManager implements IPeerManager {
 
   public get peers(): ReadonlyMap<PeerId, IPeerConnection> {
     return this._peers;
+  }
+
+  /** 受け入れる接続の数の上限 (次数) */
+  public get maxDegree(): number {
+    return this.maxDegreeLimit;
+  }
+
+  /**
+   * 次数の上限を替える (信頼 Guard を使えていない間、一般のノードも多めに受け入れる: OzNode)。
+   * 下げたときは、超えている分を rebalance の規則 (信頼 Guard・ローカルリンクは外さない) で外す。
+   */
+  public setMaxDegree(n: number): void {
+    if (!Number.isInteger(n) || n < 1 || n === this.maxDegreeLimit) return;
+    const lowered = n < this.maxDegreeLimit;
+    this.maxDegreeLimit = n;
+    if (lowered) this.rebalance();
   }
 
   public get degree(): number {
@@ -1182,18 +1215,51 @@ export class PeerManager implements IPeerManager {
     //   4 回で BAN していたため、攻撃者が安い PoW のパケットを網に流すだけで
     //   正直なノード同士が互いを BAN し合い、網が自然に分断された。
     //   流量の上限はトークンバケットが既に保証している。
-    const category = RATE_CATEGORY[decoded.type as Exclude<WireType, WireType.UNKNOWN>] ?? 'unknown';
+    let category: string = RATE_CATEGORY[decoded.type as Exclude<WireType, WireType.UNKNOWN>] ?? 'unknown';
+    // ★ 信頼 Guard からのトンネルは束ねた応答が流れるので、別の広い枠で数える (RATE_LIMITS.tunnelBackbone)
+    if (category === 'tunnel' && authenticated && this.isTrustedGuardPeer(peer!)) category = 'tunnelBackbone';
     if (!this.rateLimiter.allow(peerId, category)) {
       log.trace(() => `rate limited ${category} from ${peerId.substring(0, 8)}`);
       return;
     }
 
     if (!PRE_HANDSHAKE_TYPES.has(decoded.type) && !peer?.isVerified) {
+      // 握手の途中: 検証が済むまで取っておく (PRE_VERIFY_MAX_*)。処理はしない
+      if (peer && peer.isConnected) this.holdUntilVerified(peerId, peer, decoded.type, decoded.payload, data, bytes.byteLength);
       return;
     }
 
     this.dispatcher.dispatch(peerId, decoded.type, decoded.payload);
     this.emit('peer:data', peerId, data);
+  }
+
+  private holdUntilVerified(peerId: PeerId, conn: WebRTCPeer, type: WireType, payload: any, data: Uint8Array | string, size: number): void {
+    let q = this.preVerify.get(peerId);
+    // ★ 接続ごとに取っておく。peerId は検証前には名乗りに過ぎないので、別の接続 (同じ ID を名乗った誰か) の分を混ぜない
+    if (!q || q.conn !== conn) {
+      q = { conn, frames: [], bytes: 0 };
+      this.preVerify.set(peerId, q);
+    }
+    if (q.frames.length >= PRE_VERIFY_MAX_FRAMES || q.bytes + size > PRE_VERIFY_MAX_BYTES) {
+      this.preVerifyDropped++;
+      return;
+    }
+    q.frames.push({ type, payload, data });
+    q.bytes += size;
+  }
+
+  /** 検証が済んだ相手の、握手の途中に届いたフレームを届いた順に処理する */
+  private flushPreVerify(peerId: PeerId): void {
+    const q = this.preVerify.get(peerId);
+    if (!q) return;
+    this.preVerify.delete(peerId);
+    for (const f of q.frames) {
+      const peer = this._peers.get(peerId);
+      // 検証したのと同じ接続の分だけ。検証の通知の中で外された (次数の調整など) なら捨てる
+      if (!peer || peer !== q.conn || !peer.isVerified) return;
+      this.dispatcher.dispatch(peerId, f.type, f.payload);
+      this.emit('peer:data', peerId, f.data);
+    }
   }
 
   public sendMessage(peerId: PeerId, type: WireType, payload: any): void {
@@ -1225,6 +1291,7 @@ export class PeerManager implements IPeerManager {
       this.pexRoutes.delete(peerId);
       this.pendingSignals.delete(peerId);
       this.pendingMeta.delete(peerId);
+      this.preVerify.delete(peerId);
       this.rateLimiter.forget(peerId);
       this.emit('peer:disconnect', peerId);
     }

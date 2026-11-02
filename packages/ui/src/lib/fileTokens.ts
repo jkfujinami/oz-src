@@ -1,4 +1,5 @@
 import { parseFileLinks, type FileLink } from '@oz/core';
+import { t } from '../i18n';
 
 export type BodyPart =
   | { type: 'text'; text: string }
@@ -23,7 +24,7 @@ export function splitFileTokens(content: string): BodyPart[] {
 }
 
 /** 一覧など、カードを置けない所で使う: トークンを短い表記に置き換える */
-export function replaceFileTokens(content: string, label = '[添付ファイル]'): string {
+export function replaceFileTokens(content: string, label = t('file.tokenLabel')): string {
   return splitFileTokens(content).map(p => (p.type === 'text' ? p.text : label)).join('');
 }
 

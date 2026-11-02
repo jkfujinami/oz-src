@@ -1,3 +1,5 @@
+import { t } from '../i18n';
+
 /**
  * パスワードの強度の目安と、覚えやすい長いパスワードの生成。すべて端末内で完結する。
  */
@@ -73,14 +75,14 @@ export function estimateStrength(passphrase: string, minLength: number): Passphr
   let bits = Math.log2(Math.max(pool, 2)) * Math.min(passphrase.length, distinct * 2) * 0.6;
 
   // 連番・キーボード順は大きく割り引く
-  if (/(0123|1234|2345|3456|4567|5678|6789|abcd|bcde|qwer|asdf|zxcv|password|パスワード)/i.test(passphrase)) {
+  if (/(0123|1234|2345|3456|4567|5678|6789|abcd|bcde|qwer|asdf|zxcv|password|パスワード)/i.test(passphrase)) { // i18n-ignore: 弱い並びの照合 (画面に出さない)
     bits = Math.min(bits, 28);
   }
 
   if (passphrase.length < minLength) {
-    return { level: 'short', label: `短すぎます (あと ${minLength - passphrase.length} 文字)`, bits };
+    return { level: 'short', label: t('passphrase.short', { n: minLength - passphrase.length }), bits };
   }
-  if (bits < 40) return { level: 'weak', label: '弱い: 長さや文字の種類を増やしてください', bits };
-  if (bits < 60) return { level: 'fair', label: 'まずまず: もう少し長いとより安全です', bits };
-  return { level: 'strong', label: '強い', bits };
+  if (bits < 40) return { level: 'weak', label: t('passphrase.weak'), bits };
+  if (bits < 60) return { level: 'fair', label: t('passphrase.fair'), bits };
+  return { level: 'strong', label: t('passphrase.strong'), bits };
 }

@@ -10,8 +10,11 @@ import {
   levelName,
   setSink,
   installConsoleHandle,
+  onLogRecord,
   type Sink,
+  type LogRecord,
 } from '../../src/common/Logger';
+import { LogHistory } from '../../src/common/LogHistory';
 
 function capture() {
   const lines: Array<{ method: keyof Sink; args: unknown[] }> = [];
@@ -306,5 +309,43 @@ describe('Logger: 端末に残さない・ID を出し切らない', () => {
     lines.length = 0;
     log.info(`peer ${id}`);
     expect(lines[0].args[1]).toContain(id);
+  });
+});
+
+describe('画面のログ表示への流し込み (onLogRecord / LogHistory)', () => {
+  it('★出た行だけを受け取る (レベルで落ちた行は来ない)。長い ID は DEBUG / TRACE でも縮める', () => {
+    capture();
+    setLevel('*', 'debug');
+    const got: LogRecord[] = [];
+    const off = onLogRecord((r) => got.push(r));
+    const log = createLogger('net.gossip');
+    const peer = 'a'.repeat(64);
+    log.debug('relay to', peer, { n: 1n, raw: new Uint8Array(3) });
+    log.trace(() => 'not shown');
+    log.warn(new Error(`bad ${peer}`));
+    off();
+    log.error('after off');
+    expect(got.map(r => [r.scope, r.level])).toEqual([['net.gossip', LogLevel.DEBUG], ['net.gossip', LogLevel.WARN]]);
+    expect(got[0].text).toBe('relay to aaaaaaaa… {"n":"1","raw":"<3 bytes>"}');
+    expect(got[1].text).toBe('Error: bad aaaaaaaa…');
+    expect(got[1].seq).toBeGreaterThan(got[0].seq);
+  });
+
+  it('LogHistory は直近の上限行だけを古い順で持ち、clear で空になる。購読者に知らせる', () => {
+    capture();
+    const h = new LogHistory(3);
+    h.start();
+    const changed = vi.fn();
+    h.subscribe(changed);
+    const log = createLogger('x');
+    for (let i = 1; i <= 5; i++) log.error(`line ${i}`);
+    expect(h.snapshot().map(r => r.text)).toEqual(['line 3', 'line 4', 'line 5']);
+    expect(h.dropped).toBe(2);
+    expect(changed).toHaveBeenCalledTimes(5);
+    h.clear();
+    expect(h.size).toBe(0);
+    h.stop();
+    log.error('after stop');
+    expect(h.size).toBe(0);
   });
 });

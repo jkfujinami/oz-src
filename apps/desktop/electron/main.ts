@@ -11,6 +11,7 @@ import { pathToFileURL } from 'node:url';
 import { clearVolatileData, removeDirContents, wipeDeviceData } from './wipe';
 import { GuardHost } from './guardHost';
 import { createLocalTrackerService } from './localTracker';
+import { installOzLockerHandler, registerOzLockerScheme } from './ozlocker';
 
 /**
  * ★ 端末に残る痕跡を減らす設定 (app が ready になる前に決める)
@@ -28,6 +29,9 @@ import { createLocalTrackerService } from './localTracker';
  *   保存領域 (Cookie・Local Storage・キャッシュ等) をロックのたびに消す。
  */
 const APP_NAME = 'OZ';
+
+// ★ 独自スキームの登録は app の ready より前でなければならない
+registerOzLockerScheme();
 app.commandLine.appendSwitch('disk-cache-size', '1');
 app.commandLine.appendSwitch('disable-breakpad');
 // ★ WebRTC は LAN 内のアドレスを出さない ('default_public_interface_only'。UDP は使える)。
@@ -354,6 +358,8 @@ if (!gotTheLock) {
   });
 
   app.whenReady().then(() => {
+    // ★ Ozzy はロッカーへ main から直接つなぐ (Worker を使わない)。画面のウィンドウを開く前に受け口を付ける
+    installOzLockerHandler();
     session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
       callback(ALLOWED_PERMISSIONS.has(permission));
     });

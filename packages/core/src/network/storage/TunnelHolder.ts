@@ -37,6 +37,18 @@ export const TUNNEL_HOLDER_LIMITS = {
    */
   CHUNK_INTERVAL_MS: 10,
   /**
+   * 送出の枠を貯められる時間 (ms)。タイマーが遅れた分 (ネストの 4ms・バックグラウンドのタブの 1 秒など) は、この時間ぶんまで
+   * 次の回にまとめて送る。10ms 間隔なら 1 回に最大 25 片 (約 375KiB)。平均の速さ (1 片 / CHUNK_INTERVAL_MS) は変わらない。
+   */
+  PUMP_BURST_MS: 250,
+  /**
+   * 受け口への送信待ち (DataChannel + 手元の列) がこれを超えていたら、減るまで送らない。上りの遅い保持者が
+   * 何 MiB も溜めて、同じ接続の投稿・オニオンのセルを遅らせないため (Ozzy の LinkPacer と同じ値)。
+   */
+  PUMP_MAX_BUFFERED: 1024 * 1024,
+  /** 送信待ちが多くて送れなかったときに、もう一度見るまで (ms) */
+  PUMP_BLOCKED_RETRY_MS: 20,
+  /**
    * ── C4: 預け入れ (PUT_CHUNK) の押し流し対策 (docs/design/file-sharing.md §6) ──
    * ★ PUT の断片は大きい (約 15KiB) ので、小さな要求 (FETCH_BUCKET・GET_CHUNK) の枠 (PER_HOP_REQ_PER_SEC = 10/秒) とは**別の枠**で数える。
    *   同じ枠にすると、1 チャンク (18 断片) の預け入れで読み出しが締め出され、逆に読み出しが多いと預け入れが進まない。
@@ -142,7 +154,9 @@ export class TunnelHolder {
   private active: Response[] = [];
   private activeCount = 0;
   private pumpTimer: ReturnType<typeof setTimeout> | null = null;
-  private lastSendAt = 0;
+  /** 送ってよい片の数 (経過時間で貯まり、PUMP_BURST_MS ぶんで頭打ち) */
+  private credit: number;
+  private creditAt: number;
   private destroyed = false;
 
   /** 診断・テスト用 */
@@ -169,7 +183,7 @@ export class TunnelHolder {
   };
 
   constructor(
-    private readonly peerManager: IPeerManager,
+    private readonly peerManager: IPeerManager & { bufferedAmountOf?(peerId: PeerId): number },
     dispatcher: IMessageDispatcher,
     leaseRouter: LeaseSetRouter,
     private readonly identity: StorageIdentity,
@@ -194,6 +208,8 @@ export class TunnelHolder {
       assemblyTtlMs: l.assemblyTtlMs ?? TUNNEL_HOLDER_LIMITS.ASSEMBLY_TTL_MS,
       maxStoring: l.maxStoring ?? TUNNEL_HOLDER_LIMITS.MAX_STORING,
     };
+    this.credit = this.creditCap();
+    this.creditAt = this.now();
     this.chunks = options.chunks ?? null;
     this.chunkEffort = options.chunks?.effort ?? CHUNK_EFFORT;
     dispatcher.register(WireType.TUNNEL_DELIVER, (from, msg) => this.handleDeliver(from, msg));
@@ -500,25 +516,63 @@ export class TunnelHolder {
     this.pump();
   }
 
-  /** 応答の片を 1 つずつ、間隔を空けて送る。複数の応答は順番に 1 片ずつ (1 つの大きい応答が他を待たせない) */
+  /** 貯められる片の数の上限 (少なくとも 1 片) */
+  private creditCap(): number {
+    return Math.max(1, TUNNEL_HOLDER_LIMITS.PUMP_BURST_MS / this.lim.chunkIntervalMs);
+  }
+
+  /**
+   * 応答の片を、平均 1 片 / chunkIntervalMs の速さで送る。複数の応答は順番に 1 片ずつ (1 つの大きい応答が他を待たせない)。
+   * タイマーが遅れた分は枠 (credit) に貯まり、次の回にまとめて送る。受け口への送信待ちが多ければ、減るまで待つ。
+   */
   private pump(): void {
     if (this.pumpTimer || this.active.length === 0 || this.destroyed) return;
-    const wait = Math.max(0, this.lastSendAt + this.lim.chunkIntervalMs - this.now());
+    this.refill();
+    const wait = this.credit >= 1 ? 0 : Math.ceil((1 - this.credit) * this.lim.chunkIntervalMs);
     this.pumpTimer = setTimeout(() => {
       this.pumpTimer = null;
-      const r = this.active.shift();
-      if (!r) return;
+      if (this.destroyed) return;
+      const blocked = this.sendSome();
+      if (blocked) {
+        this.pumpTimer = setTimeout(() => {
+          this.pumpTimer = null;
+          this.pump();
+        }, TUNNEL_HOLDER_LIMITS.PUMP_BLOCKED_RETRY_MS);
+        return;
+      }
+      this.pump();
+    }, wait);
+  }
+
+  private refill(): void {
+    const t = this.now();
+    this.credit = Math.min(this.creditCap(), this.credit + Math.max(0, t - this.creditAt) / this.lim.chunkIntervalMs);
+    this.creditAt = t;
+  }
+
+  /** 枠の分だけ送る。残っている応答が全部、受け口の送信待ちで止まっていれば true */
+  private sendSome(): boolean {
+    this.refill();
+    let stalled = 0;
+    while (this.credit >= 1 && this.active.length > 0) {
+      const r = this.active.shift()!;
+      if ((this.peerManager.bufferedAmountOf?.(r.gateway) ?? 0) > TUNNEL_HOLDER_LIMITS.PUMP_MAX_BUFFERED) {
+        this.active.push(r);
+        if (++stalled >= this.active.length) return true;
+        continue;
+      }
+      stalled = 0;
+      this.credit -= 1;
       const seq = r.next++;
       const final = r.next >= r.chunks.length;
-      this.lastSendAt = this.now();
       this.stats.chunksSent++;
       this.peerManager.sendMessage(r.gateway, WireType.TUNNEL_REPLY, {
         returnTag: r.returnTag, toHop: r.hop, seq, final, body: r.chunks[seq],
       });
       if (final) r.release();
       else this.active.push(r);
-      this.pump();
-    }, wait);
+    }
+    return false;
   }
 
   private dropResponses(gateway: PeerId): void {

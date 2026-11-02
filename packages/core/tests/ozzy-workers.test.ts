@@ -186,3 +186,73 @@ describe('OzNode: 自分の Worker を設定するまで Ozzy は使えない', 
     void OZZY_MESH_STATUS; void decodeRangeResponse; void encodeRangeRequest;
   }, 60_000);
 });
+
+describe('OzNode: デスクトップ (ロッカーへ直接つなぐ) は Worker を使わない', () => {
+  it('★Worker なしで Ozzy を使え、M1 の役は直接の通信路で受け持つ。切った設定は暗号化 DB に残り、Worker の設定は断る', async () => {
+    const dbName = 'OzzyDirect_' + Date.now();
+    const asked: string[] = [];
+    const lockerTransport = async (req: Request) => {
+      asked.push(`${req.method} ${req.url} ${req.headers.get('range') ?? ''}`);
+      return new Response(null, { status: 404 });
+    };
+    const make = async () => {
+      const db = new IndexedDBStore(dbName);
+      await db.init();
+      return OzNode.create({
+        storage: { slotEffort: 1, chunkEffort: 1 }, db, autoStart: false, passphrase: 'test-passphrase', vaultParams: VAULT_PARAMS_FAST,
+        ozzy: { lockerTransport },
+      });
+    };
+    const node = await make();
+    try {
+      expect(node.ozzyDirect).toBe(true);
+      expect(node.ozzyReady).toBe(true);
+      expect(node.ozzyWorkerUrl).toBeNull();
+      expect(node.ozzyFetcherEnabled).toBe(true);
+      expect(node.ozzyExit.serving).toBe(true);
+      // M1 として頼まれた取得は、他人の Worker ではなく直接の通信路で行く
+      const server = (node as any).makeRangeServer();
+      const res = decodeRangeResponse(await server.serve(encodeRangeRequest({
+        lockerId: 'catbox', url: 'https://files.catbox.moe/abc.bin', start: 0, length: 64, expectedTag: new Uint8Array(16),
+      })));
+      expect(res?.status).toBe(OZZY_MESH_STATUS.NOT_FOUND);
+      expect(asked).toEqual(['GET https://files.catbox.moe/abc.bin bytes=0-63']);
+      // Worker は設定できない
+      expect(await node.setOzzyWorker('https://ozzy.me.workers.dev', async () => ({ ok: true }))).toEqual({ ok: false, reason: 'direct' });
+      // M1 の役を切っても、自分が Ozzy を使うことはできる
+      await node.setOzzyFetcherEnabled(false);
+      expect(node.ozzyFetcherEnabled).toBe(false);
+      expect(node.ozzyExit.serving).toBe(false);
+      expect(node.ozzyReady).toBe(true);
+    } finally {
+      await node.stop();
+    }
+    // 切った設定は再起動しても残る
+    const again = await make();
+    try {
+      expect(again.ozzyFetcherEnabled).toBe(false);
+      expect(again.ozzyExit.serving).toBe(false);
+      await again.setOzzyFetcherEnabled(true);
+      expect(again.ozzyExit.serving).toBe(true);
+    } finally {
+      await again.stop();
+    }
+  }, 60_000);
+
+  it('直接つながない端末 (ブラウザ) は、M1 の役を Worker の設定でしか切り替えない', async () => {
+    const db = new IndexedDBStore('OzzyNotDirect_' + Date.now());
+    await db.init();
+    const node = await OzNode.create({
+      storage: { slotEffort: 1, chunkEffort: 1 }, db, autoStart: false, passphrase: 'test-passphrase', vaultParams: VAULT_PARAMS_FAST,
+    });
+    try {
+      expect(node.ozzyDirect).toBe(false);
+      expect(node.ozzyFetcherEnabled).toBe(false);
+      await expect(node.setOzzyFetcherEnabled(true)).rejects.toThrow(/directly/);
+      expect(await node.setOzzyWorker('https://ozzy.me.workers.dev', async () => ({ ok: true }))).toEqual({ ok: true });
+      expect(node.ozzyFetcherEnabled).toBe(true);
+    } finally {
+      await node.stop();
+    }
+  }, 60_000);
+});

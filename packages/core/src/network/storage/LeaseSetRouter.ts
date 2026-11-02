@@ -20,10 +20,42 @@ export const LEASESET_ROUTER_LIMITS = {
   SYNC_MIN_INTERVAL_MS: 60_000,
   /** SYNC の送出間隔 (ms)。1 フレーム 16KiB × 約 16 回/秒 = 約 256KiB/秒。受け手の枠 (RATE_LIMITS.leaseset) に収まる */
   SYNC_FRAME_INTERVAL_MS: 60,
-  /** 同時に応答する相手の数。超えたら無視する (相手は次の機会に頼み直す) */
+  /** 同時に応答する相手の数。超えたら無視する (相手は SYNC_RETRY_MS で頼み直す) */
   MAX_SYNC_SESSIONS: 8,
   /** SYNC を待つ時間 (最後のフレームまたは要求から)。過ぎたら以後の SYNC は受け付けない */
   SYNC_WAIT_MS: 5 * MINUTE_MS,
+  /**
+   * SYNC の応答が 1 フレームも来なければ、頼み直すまでの間隔 (ms)。並びの数が頼み直しの上限。
+   * ★ 握手は片道ずつ終わる: こちらが相手を検証済みにした直後は、相手がまだこちらを検証済みにしていないことがあり、
+   *   その間の要求は相手の PeerManager が黙って捨てる。頼み直さないと、後から参加した端末は参加より前に出された
+   *   leaseSet を (2 時間ごとの出し直しまで) 知らないままになり、保持者を見つけられない (エミュレーターで 30 台中 4 台に起きた)。
+   *   同時に応答する数の上限 (MAX_SYNC_SESSIONS) で断られたときも、これで頼み直す。
+   */
+  SYNC_RETRY_MS: [5_000, 15_000, 60_000],
+  /**
+   * 1 ホップ目に SYNC を頼んでから、別の隣人にもう 1 回頼むまで (ms)。別の隣人がまだ居なければ、同じ間隔で
+   * SYNC_SECOND_PASS_TRIES 回まで待ち直す (同じ相手には頼まない: 応答する側の間隔 SYNC_MIN_INTERVAL_MS で捨てられる)。
+   * ★ SYNC は相手の手持ちのその時点の写しでしかない。相手も参加したばかりで集め終わっていなければ、写しに無い leaseSet は
+   *   flood ではもう来ない (2 時間ごとの出し直しまで)。別の隣人の写しで埋める。
+   * ★ 網が一斉に立ち上がるときは、2 回目の相手も集め終わっていないことがある (エミュレーターで、参加したばかりの 2 台が
+   *   互いを 1 ホップ目にし、2 回目の相手も 1 秒違いで参加した端末で、30 台中 19 台分で止まった)。同じ頃に参加した端末どうしは
+   *   欠け方も同じなので、「新しいものが無かった」だけでは揃った証拠にならない。次のどれかなら、同じ間隔でさらに別の隣人に頼む
+   *   (SYNC_PASS_MAX 回まで):
+   *     - 写しで新しく入ったものがあった
+   *     - 相手の写しが、頼んだときの自分の手持ちより少なかった (相手の方が知らない)
+   *     - 網が立ち上がったばかり (知っている leaseSet がどれも SYNC_YOUNG_NET_MS 以内に出されたもの)
+   *   集め終わった網では 1 ホップ目の写しが揃っているので、2 回目の写しは手持ちと同じで、1 回で止まる。
+   */
+  SYNC_SECOND_PASS_MS: 20_000,
+  SYNC_SECOND_PASS_TRIES: 3,
+  /** 1 ホップ目のあとに別の隣人へ頼む回数の上限 (応答が無かった分も数える) */
+  SYNC_PASS_MAX: 3,
+  /** 別の隣人に頼んでから最初のフレームを待つ時間 (ms)。来なければ (捨てられた・応答の上限) 次の隣人へ */
+  SYNC_PASS_WAIT_MS: 10_000,
+  /** 最後のフレームからこれだけ来なければ、その隣人の写しは届き終わったとみなす (ms) */
+  SYNC_PASS_IDLE_MS: 3_000,
+  /** 知っている leaseSet がどれもこの時間内に出されたものなら、網が立ち上がったばかりとみなす (ms。出し直しは 2 時間ごと) */
+  SYNC_YOUNG_NET_MS: 10 * MINUTE_MS,
   /** 期限切れの掃除の間隔 */
   PRUNE_INTERVAL_MS: MINUTE_MS,
 } as const;
@@ -79,8 +111,21 @@ export class LeaseSetRouter {
   private lastSyncServed = new Map<PeerId, number>();
   /** SYNC を頼んだ相手 → 受け付ける期限 */
   private awaiting = new Map<PeerId, number>();
-  /** 頼み済みの相手 (切れるまで頼み直さない) */
+  /** 頼み済みの相手 (切れるまで頼み直さない。応答が来なければ SYNC_RETRY_MS で頼み直す) */
   private requested = new Set<PeerId>();
+  /** SYNC が 1 フレームでも届いた相手 */
+  private synced = new Set<PeerId>();
+  private syncRetryTimers = new Map<PeerId, ReturnType<typeof setTimeout>>();
+  /** 1 ホップ目のあとの SYNC (別の隣人)。1 ホップ目に最初に頼んだときに始め、揃うまで (SYNC_SECOND_PASS_MS の説明) */
+  private secondPassTimer: ReturnType<typeof setTimeout> | null = null;
+  private secondPassDone = false;
+  private passStarted = false;
+  /** 頼み済みの相手 (1 ホップ目を含む)。同じ相手には頼まない */
+  private passAsked = new Set<PeerId>();
+  private passesSent = 0;
+  /** いま写しを待っている隣人。届いたフレームと件数、そのうち新しく入った数、頼んだときの自分の手持ちの数 */
+  private pass: { peer: PeerId; frames: number; received: number; gained: number; sizeAtAsk: number } | null = null;
+  private passTimer: ReturnType<typeof setTimeout> | null = null;
   private tunnelIds = new Map<string, Uint8Array>();
   private lastExpiresMin = 0;
   private lastPublishedGateway: string | null = null;
@@ -94,7 +139,7 @@ export class LeaseSetRouter {
   private destroyed = false;
 
   /** 診断・テスト用: 受け付けた / 拒否した件数 */
-  public readonly stats = { accepted: 0, stale: 0, tooSoon: 0, deferred: 0, rejected: new Map<LeaseSetRejection | 'malformed', number>(), published: 0 };
+  public readonly stats = { accepted: 0, stale: 0, tooSoon: 0, deferred: 0, rejected: new Map<LeaseSetRejection | 'malformed', number>(), published: 0, syncRetries: 0, secondPass: 0 };
 
   private readonly onVerified = (peer: { peerId: PeerId }) => {
     if (peer?.peerId === this.dandelion.getPinnedGuardId()) this.maybeRequestSync();
@@ -272,6 +317,35 @@ export class LeaseSetRouter {
     this.requested.add(id);
     this.awaiting.set(id, this.now() + LEASESET_ROUTER_LIMITS.SYNC_WAIT_MS);
     this.peerManager.sendMessage(id, WireType.LEASESET_SYNC_REQ, {});
+    this.armSyncRetry(id, 0);
+    // 別の隣人への SYNC は、1 ホップ目の応答を待たずに数え始める (1 ホップ目が応答しないままでも埋まる)
+    if (!this.passStarted) {
+      this.passStarted = true;
+      this.passAsked.add(id);
+      this.scheduleSecondPass();
+    }
+  }
+
+  /** 応答が来なければ頼み直す (相手がまだこちらを検証済みにしていない・同時の応答の上限で断られた) */
+  private armSyncRetry(id: PeerId, tries: number): void {
+    const delays = LEASESET_ROUTER_LIMITS.SYNC_RETRY_MS;
+    const prev = this.syncRetryTimers.get(id);
+    if (prev) clearTimeout(prev);
+    this.syncRetryTimers.delete(id);
+    if (tries >= delays.length) return;
+    const timer = setTimeout(() => {
+      this.syncRetryTimers.delete(id);
+      if (this.destroyed || this.synced.has(id) || !this.requested.has(id)) return;
+      if (this.dandelion.getPinnedGuardId() !== id) return; // もう 1 ホップ目ではない (新しい 1 ホップ目には別に頼む)
+      const peer = this.peerManager.peers.get(id);
+      if (!peer || !peer.isConnected || !peer.isVerified) return;
+      this.stats.syncRetries++;
+      this.awaiting.set(id, this.now() + LEASESET_ROUTER_LIMITS.SYNC_WAIT_MS);
+      this.peerManager.sendMessage(id, WireType.LEASESET_SYNC_REQ, {});
+      this.armSyncRetry(id, tries + 1);
+    }, delays[tries]);
+    (timer as any).unref?.();
+    this.syncRetryTimers.set(id, timer);
   }
 
   private handleSyncReq(peerId: PeerId): void {
@@ -282,9 +356,10 @@ export class LeaseSetRouter {
     const last = this.lastSyncServed.get(peerId);
     if (this.sessions.has(peerId) || (last !== undefined && now - last < this.opts.syncMinIntervalMs)) return;
     if (this.sessions.size >= LEASESET_ROUTER_LIMITS.MAX_SYNC_SESSIONS) return;
-    this.lastSyncServed.set(peerId, now);
+    // ★ 空なら応答したことにしない: 参加したばかりで空のうちに頼まれても、集まったあとの頼み直し (SYNC_RETRY_MS) には間隔を待たずに応える
     const items = this.store.allBytes();
     if (items.length === 0) return;
+    this.lastSyncServed.set(peerId, now);
     this.sessions.set(peerId, { items, next: 0, timer: null });
     this.pump(peerId);
   }
@@ -328,13 +403,95 @@ export class LeaseSetRouter {
     const sets: unknown = msg?.leaseSets;
     if (!Array.isArray(sets)) return;
     this.awaiting.set(senderId, now + LEASESET_ROUTER_LIMITS.SYNC_WAIT_MS);
+    this.synced.add(senderId);
+    const retry = this.syncRetryTimers.get(senderId);
+    if (retry) clearTimeout(retry);
+    this.syncRetryTimers.delete(senderId);
+    let gained = 0;
     for (const bytes of sets) {
       if (!(bytes instanceof Uint8Array)) continue;
       const id = leaseSetId(bytes);
       if (this.seen.has(id)) continue;
       this.seen.add(id);
-      this.accept(bytes); // 中継はしない
+      if (this.accept(bytes)) gained++; // 中継はしない
     }
+    if (this.pass?.peer === senderId) {
+      this.pass.frames++;
+      this.pass.received += sets.length;
+      this.pass.gained += gained;
+      this.armPassTimer(LEASESET_ROUTER_LIMITS.SYNC_PASS_IDLE_MS);
+    }
+  }
+
+  /** 1 ホップ目の写しで欠けた分を、別の隣人の写しで埋める (SYNC_SECOND_PASS_MS 後) */
+  private scheduleSecondPass(attempt = 0): void {
+    if (this.secondPassDone || this.secondPassTimer || this.destroyed) return;
+    if (attempt >= LEASESET_ROUTER_LIMITS.SYNC_SECOND_PASS_TRIES || this.passesSent >= LEASESET_ROUTER_LIMITS.SYNC_PASS_MAX) {
+      this.secondPassDone = true;
+      return;
+    }
+    this.secondPassTimer = setTimeout(() => {
+      this.secondPassTimer = null;
+      if (!this.askNextPeer()) this.scheduleSecondPass(attempt + 1);
+    }, LEASESET_ROUTER_LIMITS.SYNC_SECOND_PASS_MS);
+    (this.secondPassTimer as any).unref?.();
+  }
+
+  /** まだ頼んでいない隣人を 1 人選んで頼む。頼めたら true (上限・終わっているときも true) */
+  private askNextPeer(): boolean {
+    if (this.destroyed || this.secondPassDone) return true;
+    if (this.passesSent >= LEASESET_ROUTER_LIMITS.SYNC_PASS_MAX) {
+      this.secondPassDone = true;
+      return true;
+    }
+    const others = Array.from(this.peerManager.peers.values())
+      .filter(p => p.isConnected && p.isVerified && !this.passAsked.has(p.peerId));
+    if (others.length === 0) return false;
+    const pick = others[Math.floor(Math.random() * others.length)];
+    this.passAsked.add(pick.peerId);
+    this.passesSent++;
+    this.stats.secondPass++;
+    this.pass = { peer: pick.peerId, frames: 0, received: 0, gained: 0, sizeAtAsk: this.store.size };
+    this.awaiting.set(pick.peerId, this.now() + LEASESET_ROUTER_LIMITS.SYNC_WAIT_MS);
+    this.peerManager.sendMessage(pick.peerId, WireType.LEASESET_SYNC_REQ, {});
+    this.armPassTimer(LEASESET_ROUTER_LIMITS.SYNC_PASS_WAIT_MS);
+    return true;
+  }
+
+  private armPassTimer(ms: number): void {
+    if (this.passTimer) clearTimeout(this.passTimer);
+    this.passTimer = setTimeout(() => {
+      this.passTimer = null;
+      this.finishPass();
+    }, ms);
+    (this.passTimer as any).unref?.();
+  }
+
+  /**
+   * いまの隣人の写しが届き終わった (または来なかった・途中で切れた)。
+   * 来なかった・切れた → すぐ次の隣人へ。揃った証拠にならない (SYNC_SECOND_PASS_MS の説明) → 間隔を空けて次の隣人へ。
+   * それ以外 → 揃ったとみなして止める。
+   */
+  private finishPass(cut = false): void {
+    const p = this.pass;
+    this.pass = null;
+    if (this.passTimer) clearTimeout(this.passTimer);
+    this.passTimer = null;
+    if (!p || this.destroyed || this.secondPassDone) return;
+    if (p.frames === 0 || cut) {
+      if (!this.askNextPeer()) this.scheduleSecondPass();
+    } else if (p.gained > 0 || p.received < p.sizeAtAsk || this.networkIsYoung()) {
+      this.scheduleSecondPass();
+    } else {
+      this.secondPassDone = true;
+    }
+  }
+
+  /** 知っている leaseSet がどれも SYNC_YOUNG_NET_MS 以内に出されたものか (何も知らなければ false) */
+  private networkIsYoung(): boolean {
+    const earliest = this.store.earliestExpiresMs();
+    if (earliest === null) return false;
+    return earliest - LEASESET_LIFETIME_MS >= this.now() - LEASESET_ROUTER_LIMITS.SYNC_YOUNG_NET_MS;
   }
 
   private forgetPeer(peerId: PeerId): void {
@@ -344,6 +501,12 @@ export class LeaseSetRouter {
     this.lastSyncServed.delete(peerId);
     this.awaiting.delete(peerId);
     this.requested.delete(peerId);
+    this.synced.delete(peerId);
+    const retry = this.syncRetryTimers.get(peerId);
+    if (retry) clearTimeout(retry);
+    this.syncRetryTimers.delete(peerId);
+    // 写しを待っていた隣人が切れた: 待たずに次の隣人へ (届いた分までで判断する)
+    if (this.pass?.peer === peerId) this.finishPass(true);
   }
 
   public destroy(): void {
@@ -355,6 +518,13 @@ export class LeaseSetRouter {
     this.publishTimer = null;
     this.pruneTimer = null;
     for (const id of Array.from(this.sessions.keys())) this.forgetPeer(id);
+    for (const t of this.syncRetryTimers.values()) clearTimeout(t);
+    this.syncRetryTimers.clear();
+    if (this.secondPassTimer) clearTimeout(this.secondPassTimer);
+    this.secondPassTimer = null;
+    if (this.passTimer) clearTimeout(this.passTimer);
+    this.passTimer = null;
+    this.pass = null;
     this.peerManager.off('peer:verified', this.onVerified);
     this.peerManager.off('peer:disconnect', this.onDisconnect);
     this.seen.destroy();

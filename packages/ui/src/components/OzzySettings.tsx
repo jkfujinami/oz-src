@@ -3,37 +3,42 @@ import { createProviderLeaseSet, isSafeExternalHttpsUrl, sodium, sodiumReady } f
 import { useP2P } from '../providers/P2PProvider';
 import { setOzzyPrefs, useOzzyPrefs } from '../lib/ozzyPrefs';
 import { OzzyWorkerForm } from './OzzyWorkerForm';
+import { tRich, useT } from '../i18n';
 
 /** 設定画面の「ファイル共有」: 中継 Worker・保存先・Slab の束ね方・Gatekeeper の登録 */
 export function OzzySettings() {
+  const t = useT();
   const { node } = useP2P();
   const prefs = useOzzyPrefs();
   const [ownWorker, setOwnWorker] = useState<string | null>(node?.ozzyWorkerUrl ?? null);
   const [knownWorkers, setKnownWorkers] = useState<number>(0);
   const [changing, setChanging] = useState(false);
+  const [fetcherOn, setFetcherOn] = useState<boolean>(node?.ozzyFetcherEnabled ?? false);
+  const [fetcherError, setFetcherError] = useState<string | null>(null);
   const [gkUrl, setGkUrl] = useState('');
   const [gkBackend, setGkBackend] = useState('cloudflare-r2');
   const [gkStatus, setGkStatus] = useState<string | null>(null);
 
   useEffect(() => {
     setOwnWorker(node?.ozzyWorkerUrl ?? null);
-    const t = setInterval(() => setKnownWorkers(node?.ozzyWorkers.size ?? 0), 2000);
-    return () => clearInterval(t);
+    setFetcherOn(node?.ozzyFetcherEnabled ?? false);
+    const timer = setInterval(() => setKnownWorkers(node?.ozzyWorkers.size ?? 0), 2000);
+    return () => clearInterval(timer);
   }, [node]);
 
   const registerGatekeeper = async () => {
     const cleanUrl = gkUrl.trim().replace(/\/+$/, '');
     if (!isSafeExternalHttpsUrl(cleanUrl)) {
-      setGkStatus('外部の HTTPS の URL を入れてください (HTTP やプライベートな IP は使えません)');
+      setGkStatus(t('settings.ozzy.badUrl'));
       return;
     }
     try {
-      setGkStatus(`確かめています: ${cleanUrl}/ozzy/v2/status`);
+      setGkStatus(t('settings.ozzy.checking', { url: cleanUrl }));
       await sodiumReady;
       let freeDataSlots = 2074;
       let classACount = 0;
       let classBCount = 0;
-      let statusText = '応答あり';
+      let statusText = t('settings.ozzy.responded');
       try {
         const res = await fetch(`${cleanUrl}/ozzy/v2/status`, { method: 'GET', cache: 'no-store' });
         if (res.ok) {
@@ -45,7 +50,7 @@ export function OzzySettings() {
           statusText = `HTTP ${res.status}`;
         }
       } catch {
-        statusText = '応答なし (登録だけ済ませました)';
+        statusText = t('settings.ozzy.noResponse');
       }
       const kp = sodium.crypto_sign_keypair();
       const lease = await createProviderLeaseSet({
@@ -63,22 +68,56 @@ export function OzzySettings() {
         ],
       });
       setGkUrl('');
-      setGkStatus(`登録しました: ${cleanUrl}`);
+      setGkStatus(t('settings.ozzy.registered', { url: cleanUrl }));
     } catch (err) {
-      setGkStatus(`登録できませんでした: ${err instanceof Error ? err.message : String(err)}`);
+      setGkStatus(t('settings.ozzy.registerFailed', { reason: err instanceof Error ? err.message : String(err) }));
+    }
+  };
+
+  const switchFetcher = async (on: boolean) => {
+    if (!node) return;
+    setFetcherError(null);
+    try {
+      await node.setOzzyFetcherEnabled(on);
+      setFetcherOn(node.ozzyFetcherEnabled);
+    } catch (err) {
+      setFetcherError(t('settings.ozzy.switchFailed', { reason: err instanceof Error ? err.message : String(err) }));
     }
   };
 
   return (
     <div className="stack">
+      {node?.ozzyDirect ? (
+        <div className="subpanel">
+          <div className="subpanel-title">{t('settings.ozzy.lockersTitle')}</div>
+          <div className="stack stack-sm" style={{ marginTop: 8 }}>
+            <div className="small">{t('settings.ozzy.directNote')}</div>
+            <label className="check">
+              <input
+                id="ozzy-fetcher"
+                type="checkbox"
+                checked={fetcherOn}
+                onChange={e => void switchFetcher(e.target.checked)}
+              />
+              <span>
+                <strong>{t('settings.ozzy.fetcher')}</strong>
+                <span className="muted">
+                  {' '}{t('settings.ozzy.fetcherNote')}
+                </span>
+              </span>
+            </label>
+            {fetcherError && <div className="msg msg-warn" role="status">{fetcherError}</div>}
+          </div>
+        </div>
+      ) : (
       <div className="subpanel">
-        <div className="subpanel-title">中継 Worker</div>
+        <div className="subpanel-title">{t('settings.ozzy.workerTitle')}</div>
         {ownWorker && !changing ? (
           <div className="stack stack-sm" style={{ marginTop: 8 }}>
-            <div className="small">あなたの Worker: <code className="code-inline">{ownWorker}</code></div>
-            <div className="xsmall muted">交換で知っている他の参加者の Worker: {knownWorkers} 台</div>
+            <div className="small">{tRich('settings.ozzy.ownWorker', { code: (c) => <code className="code-inline">{c}</code> }, { url: ownWorker })}</div>
+            <div className="xsmall muted">{t('settings.ozzy.knownWorkers', { count: knownWorkers })}</div>
             <div>
-              <button className="btn btn-sm" onClick={() => setChanging(true)}>変更する</button>
+              <button className="btn btn-sm" onClick={() => setChanging(true)}>{t('settings.ozzy.change')}</button>
             </div>
           </div>
         ) : (
@@ -87,19 +126,20 @@ export function OzzySettings() {
           </div>
         )}
       </div>
+      )}
 
       <div className="subpanel">
-        <div className="subpanel-title">保存先</div>
+        <div className="subpanel-title">{t('settings.ozzy.storageTitle')}</div>
         <div className="stack stack-sm" style={{ marginTop: 8 }}>
           <div className="field">
-            <label className="field-label" htmlFor="ozzy-engine">ファイルを置く先</label>
+            <label className="field-label" htmlFor="ozzy-engine">{t('settings.ozzy.engineLabel')}</label>
             <select
               id="ozzy-engine"
               value={prefs.storageEngine}
               onChange={e => setOzzyPrefs({ storageEngine: e.target.value as 'overseas-multi' | 'r2-gatekeeper' })}
             >
-              <option value="overseas-multi">海外ロッカー (オニオン回路の先のノードが置く)</option>
-              <option value="r2-gatekeeper">Gatekeeper Worker (直接通信。IP が Gatekeeper に見える)</option>
+              <option value="overseas-multi">{t('settings.ozzy.engineOverseas')}</option>
+              <option value="r2-gatekeeper">{t('settings.ozzy.engineGatekeeper')}</option>
             </select>
           </div>
           <label className="check">
@@ -110,8 +150,8 @@ export function OzzySettings() {
               onChange={e => setOzzyPrefs({ useLiveLockers: e.target.checked })}
             />
             <span>
-              <strong>実機のロッカーへ置く</strong>
-              <span className="muted"> (外すと、メモリ上のロッカーで試します。通信しません)</span>
+              <strong>{t('settings.ozzy.liveLockers')}</strong>
+              <span className="muted">{t('settings.ozzy.liveLockersNote')}</span>
             </span>
           </label>
           <label className="check">
@@ -122,18 +162,18 @@ export function OzzySettings() {
               onChange={e => setOzzyPrefs({ useFastDemoChunk: e.target.checked })}
             />
             <span>
-              <strong>小さいチャンクで試す</strong>
-              <span className="muted"> (64 KiB。外すと本番の 4 MiB)</span>
+              <strong>{t('settings.ozzy.fastChunk')}</strong>
+              <span className="muted">{t('settings.ozzy.fastChunkNote')}</span>
             </span>
           </label>
         </div>
       </div>
 
       <div className="subpanel">
-        <div className="subpanel-title">Slab の束ね方</div>
+        <div className="subpanel-title">{t('settings.ozzy.slabTitle')}</div>
         <div className="field-grid" style={{ marginTop: 8 }}>
           <div className="field">
-            <label className="field-label" htmlFor="ozzy-batch">1 本の Slab のチャンク数</label>
+            <label className="field-label" htmlFor="ozzy-batch">{t('settings.ozzy.batchLabel')}</label>
             <input
               id="ozzy-batch"
               type="number"
@@ -144,7 +184,7 @@ export function OzzySettings() {
             />
           </div>
           <div className="field">
-            <label className="field-label" htmlFor="ozzy-idle">揃わないとき待つ時間 (ms)</label>
+            <label className="field-label" htmlFor="ozzy-idle">{t('settings.ozzy.idleLabel')}</label>
             <input
               id="ozzy-idle"
               type="number"
@@ -155,7 +195,7 @@ export function OzzySettings() {
             />
           </div>
           <div className="field">
-            <label className="field-label" htmlFor="ozzy-maxwait">待つ時間の上限 (ms)</label>
+            <label className="field-label" htmlFor="ozzy-maxwait">{t('settings.ozzy.maxWaitLabel')}</label>
             <input
               id="ozzy-maxwait"
               type="number"
@@ -169,14 +209,14 @@ export function OzzySettings() {
       </div>
 
       <div className="subpanel">
-        <div className="subpanel-title">Gatekeeper Worker の登録 (セカンダリ互換)</div>
+        <div className="subpanel-title">{t('settings.ozzy.gkTitle')}</div>
         <div className="stack stack-sm" style={{ marginTop: 8 }}>
           <div className="row row-wrap" style={{ gap: 8 }}>
             <input
               id="ozzy-gk-url"
               type="text"
               className="mono"
-              aria-label="Gatekeeper Worker の URL"
+              aria-label={t('settings.ozzy.gkUrlLabel')}
               placeholder="https://ozzy-gatekeeper.<subdomain>.workers.dev"
               value={gkUrl}
               onChange={e => setGkUrl(e.target.value)}
@@ -184,7 +224,7 @@ export function OzzySettings() {
             />
             <select
               id="ozzy-gk-backend"
-              aria-label="バックエンド"
+              aria-label={t('settings.ozzy.backendLabel')}
               value={gkBackend}
               onChange={e => setGkBackend(e.target.value)}
               style={{ width: 'auto' }}
@@ -194,7 +234,7 @@ export function OzzySettings() {
               <option value="oracle-s3">oracle-s3</option>
             </select>
             <button className="btn btn-sm" onClick={() => void registerGatekeeper()} disabled={!gkUrl.trim()}>
-              登録
+              {t('settings.ozzy.register')}
             </button>
           </div>
           <label className="check">
@@ -204,7 +244,7 @@ export function OzzySettings() {
               checked={prefs.useOnlyRealWorkers}
               onChange={e => setOzzyPrefs({ useOnlyRealWorkers: e.target.checked })}
             />
-            <span>登録した Gatekeeper だけを使う</span>
+            <span>{t('settings.ozzy.gkOnly')}</span>
           </label>
           {gkStatus && <div className="msg msg-info" role="status">{gkStatus}</div>}
           {prefs.registeredWorkers.map(w => (

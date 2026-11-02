@@ -3,7 +3,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { OzNode } from '../src/node/OzNode';
 import { IndexedDBStore } from '../src/storage/IndexedDBStore';
 import { VAULT_PARAMS_FAST } from '../src/storage/SecretVault';
-import { GUARD_MAX_DEGREE, RING_MESH } from '../src/constants';
+import { GUARD_MAX_DEGREE, OPEN_SERVICE_MAX_DEGREE, RING_MESH } from '../src/constants';
 import { sodiumReady } from '../src/crypto/sodium';
 import { makeList, makeMaintainer, type Maintainer } from './helpers/guardFixtures';
 
@@ -61,6 +61,10 @@ describe('OzNode: 信頼 Guard の配線と Guard 役', () => {
     expect((client.peerManager as any).maxDegreeLimit).toBe(RING_MESH.MAX_DEGREE);
     expect([client.recent.windowMs, client.recent.maxBytes]).toEqual([3600_000, 16 * 1024 * 1024]);
     expect(client.guardStatus).toMatchObject({ mode: 'none', listVersion: 1, reason: 'waiting-for-trusted-guard' });
+    // 信頼 Guard を待っている間 (リストあり) は一般のノードのまま
+    expect(client.servesAsOpenGuard).toBe(false);
+    expect(client.tunnelRelay.currentRole).toBe('client');
+    expect(guardNode.servesAsOpenGuard).toBe(false); // Guard 役は元から Guard の大きさ
     expect(client.guards.wantedGuardIds()).toEqual([guardNode.peerId]);
 
     // 新しい版は受け入れ、保存される。古い版は拒否
@@ -80,7 +84,19 @@ describe('OzNode: 信頼 Guard の配線と Guard 役', () => {
       db: await makeDb(), passphrase: 'plain-pw', vaultParams: VAULT_PARAMS_FAST,
     });
     expect(plain.guardStatus).toMatchObject({ mode: 'none', reason: 'no-list', listVersion: null });
+    // ★ 信頼 Guard を使えない一般のノードは Guard 並みに受け持つ (72 時間のバッファ・中継の表・次数 64)。peerId は使い捨てのまま
+    expect(plain.servesAsOpenGuard).toBe(true);
+    expect(plain.peerManager.maxDegree).toBe(OPEN_SERVICE_MAX_DEGREE);
+    expect([plain.recent.windowMs, plain.recent.maxBytes]).toEqual([72 * 3600_000, 256 * 1024 * 1024]);
+    expect(plain.tunnelRelay.currentRole).toBe('guard');
+    expect((plain.peerManager as any).keepTrackerAttached).toBe(false);
     expect(await plain.importGuardList(v1)).toMatchObject({ ok: false, reason: 'no-keyset' });
+    // 画面の「状態とログ」に出す数: 同じ状態が読める (隣人なし・中継なし)
+    expect(plain.diagnostics()).toMatchObject({
+      peers: { connected: 0, verified: 0, maxDegree: OPEN_SERVICE_MAX_DEGREE },
+      guardMode: 'none', openGuardService: true,
+      dropped: { relay: 0, rate: 0, preVerify: 0 },
+    });
 
     for (const n of [guardNode, client, plain]) await n.stop();
     await expect(client.importGuardList(v1)).rejects.toThrow(/stopped/);

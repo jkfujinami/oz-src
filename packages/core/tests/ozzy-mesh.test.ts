@@ -369,11 +369,11 @@ describe('Ozzy: アップロードもオニオン回路 (告発者 → Guard →
     expect((MANIFESTS as any).size).toBe(0);
   }, 60_000);
 
-  it('削除も回路の M1 に頼める (0x0.st の削除トークン)', async () => {
+  it('削除も回路の M1 に頼める (x0.at の削除トークン。0x0.st はアップロード停止のため M1 の作業から外した)', async () => {
     MANIFESTS = memoryManifestStore();
     const cluster = new MemoryOverseasLockerCluster();
     net = await buildMeshNet(cluster);
-    const { mesh, coordinator } = onionUploader(net, ['0x0.st']);
+    const { mesh, coordinator } = onionUploader(net, ['x0.at']);
     const up = await coordinator.uploadFile({ source: randBytes(150_000), fileName: 'a.bin', mimeType: 'application/octet-stream' });
     const stored = cluster.storedFileCount;
     expect(stored).toBeGreaterThan(0);

@@ -42,6 +42,41 @@ describe('RecentBuffer: 保持', () => {
     expect(b.has(p.packet_id)).toBe(true);
   });
 
+  it('★保持時間を延ばしても、前の保持時間の外で捨てた分まで持っているとは申告しない (追いつきの相手が取り逃しを埋めなくなる)', () => {
+    const t = clock();
+    const b = new RecentBuffer({ ...RecentBuffer.limitsFor('client'), now: t.now });
+    t.advance(10 * H); // 作ってから 10 時間たった (作る前の分は境目に効かない)
+    const before = makePacket([1], t.now() - 30 * MIN);
+    b.add(before);
+    expect(b.coverageStartMs()).toBe(t.now() - 1 * H);
+    const at = t.now();
+    b.resize(RecentBuffer.limitsFor('guard').windowMs, RecentBuffer.limitsFor('guard').maxBytes);
+    expect([b.windowMs, b.maxBytes]).toEqual([72 * H, 256 * 1024 * 1024]);
+    // 延ばした直後も、5 時間後も、持っているのは「延ばした時点の 1 時間前」から
+    expect(b.coverageStartMs()).toBe(at - 1 * H);
+    t.advance(5 * H);
+    expect(b.coverageStartMs()).toBe(at - 1 * H);
+    // 前から持っていた分は捨てない (1 時間を過ぎても、新しい保持時間の中なので残る)
+    expect(b.has(before.packet_id)).toBe(true);
+    // 72 時間を過ぎれば、境目は保持時間の端に戻る
+    t.advance(72 * H);
+    expect(b.coverageStartMs()).toBe(t.now() - 72 * H);
+  });
+
+  it('保持時間を縮めると、外に出た分はすぐ捨てる', () => {
+    const t = clock();
+    const b = new RecentBuffer({ ...RecentBuffer.limitsFor('guard'), now: t.now });
+    const old = makePacket([1], t.now());
+    b.add(old);
+    t.advance(2 * H);
+    const fresh = makePacket([2], t.now());
+    b.add(fresh);
+    b.resize(RecentBuffer.limitsFor('client').windowMs, RecentBuffer.limitsFor('client').maxBytes);
+    expect(b.has(old.packet_id)).toBe(false);
+    expect(b.has(fresh.packet_id)).toBe(true);
+    expect(b.coverageStartMs()).toBe(t.now() - 1 * H);
+  });
+
   it('保持時間 (受け取った時刻から数える) を過ぎたものは、読み出しの時点で消える', () => {
     const t = clock();
     const b = new RecentBuffer({ windowMs: 72 * H, maxBytes: 1 << 20, now: t.now });

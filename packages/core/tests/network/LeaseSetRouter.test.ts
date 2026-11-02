@@ -341,6 +341,189 @@ describe('LeaseSetRouter: 新参者への一括送信 (SYNC)', () => {
     expect(t.sentTo(WireType.LEASESET_SYNC_REQ, A)).toHaveLength(2);
   });
 
+  it('★応答が 1 フレームも来なければ頼み直す (相手がまだこちらを検証済みにしておらず、要求が捨てられた)。届いたら止める・上限あり', () => {
+    vi.useFakeTimers();
+    try {
+      const t = setup({ own: null });
+      t.pm.addPeer(A);
+      t.dandelion.set(A);
+      expect(t.sentTo(WireType.LEASESET_SYNC_REQ, A)).toHaveLength(1);
+      const [d0, d1, d2] = LEASESET_ROUTER_LIMITS.SYNC_RETRY_MS;
+      vi.advanceTimersByTime(d0);
+      expect(t.sentTo(WireType.LEASESET_SYNC_REQ, A)).toHaveLength(2);
+      vi.advanceTimersByTime(d1);
+      expect(t.sentTo(WireType.LEASESET_SYNC_REQ, A)).toHaveLength(3);
+      vi.advanceTimersByTime(d2);
+      expect(t.sentTo(WireType.LEASESET_SYNC_REQ, A)).toHaveLength(4);
+      vi.advanceTimersByTime(10 * d2);
+      expect(t.sentTo(WireType.LEASESET_SYNC_REQ, A)).toHaveLength(4); // 上限 (並びの数) まで
+      expect(t.router.stats.syncRetries).toBe(3);
+
+      // 別の 1 ホップ目: 応答が届いたら、もう頼み直さない
+      const u = setup({ own: null });
+      u.pm.addPeer(B);
+      u.dandelion.set(B);
+      u.dispatcher.dispatch(B, WireType.LEASESET_SYNC, { leaseSets: [] });
+      vi.advanceTimersByTime(d0 + d1 + d2);
+      expect(u.router.stats.syncRetries).toBe(0);
+      // 隣人が 1 ホップ目しか居ないので、2 回目の SYNC は頼まない (同じ相手は応答の間隔で捨てる)
+      expect(u.sentTo(WireType.LEASESET_SYNC_REQ, B)).toHaveLength(1);
+      expect(u.router.stats.secondPass).toBe(0);
+      // 1 ホップ目でなくなった相手には頼み直さない
+      const w = setup({ own: null });
+      w.pm.addPeer(A);
+      w.pm.addPeer(B);
+      w.dandelion.set(A);
+      w.dandelion.set(B);
+      vi.advanceTimersByTime(d0);
+      expect(w.sentTo(WireType.LEASESET_SYNC_REQ, A)).toHaveLength(1);
+      for (const x of [t, u, w]) x.router.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('★1 ホップ目の写しで欠けた分を埋めるため、最初の SYNC の 20 秒後に別の隣人に頼む (写しが手持ちと同じなら 1 回で止める)', () => {
+    vi.useFakeTimers();
+    try {
+      const t = setup({ own: null });
+      t.pm.addPeer(A);
+      t.pm.addPeer(B);
+      t.dandelion.set(A);
+      t.dispatcher.dispatch(A, WireType.LEASESET_SYNC, { leaseSets: [] });
+      vi.advanceTimersByTime(LEASESET_ROUTER_LIMITS.SYNC_SECOND_PASS_MS - 1);
+      expect(t.sentTo(WireType.LEASESET_SYNC_REQ, B)).toHaveLength(0);
+      vi.advanceTimersByTime(1);
+      expect(t.sentTo(WireType.LEASESET_SYNC_REQ, B)).toHaveLength(1);
+      expect(t.router.stats.secondPass).toBe(1);
+      // B の応答を受け付ける (頼んだ相手なので)。もう一度 1 ホップ目から届いても、2 回目は頼まない
+      t.dispatcher.dispatch(B, WireType.LEASESET_SYNC, { leaseSets: [] });
+      t.dispatcher.dispatch(A, WireType.LEASESET_SYNC, { leaseSets: [] });
+      vi.advanceTimersByTime(10 * LEASESET_ROUTER_LIMITS.SYNC_SECOND_PASS_MS);
+      expect(t.sentTo(WireType.LEASESET_SYNC_REQ, B)).toHaveLength(1);
+      t.router.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('★1 ホップ目がずっと応答しなくても、頼んでから 20 秒後に別の隣人に頼む (1 ホップ目には頼み直しだけ)', () => {
+    vi.useFakeTimers();
+    try {
+      const t = setup({ own: null });
+      t.pm.addPeer(A);
+      t.pm.addPeer(B);
+      t.dandelion.set(A);
+      vi.advanceTimersByTime(LEASESET_ROUTER_LIMITS.SYNC_SECOND_PASS_MS);
+      expect(t.sentTo(WireType.LEASESET_SYNC_REQ, B)).toHaveLength(1);
+      expect(t.router.stats.secondPass).toBe(1);
+      t.router.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('★2 回目の SYNC に応答が無ければ (相手が捨てた・切れた)、別の隣人に頼む', () => {
+    vi.useFakeTimers();
+    try {
+      const t = setup({ own: null });
+      const D = pid(0xd);
+      for (const p of [A, B, C, D]) t.pm.addPeer(p);
+      t.dandelion.set(A);
+      t.dispatcher.dispatch(A, WireType.LEASESET_SYNC, { leaseSets: [] });
+      vi.advanceTimersByTime(LEASESET_ROUTER_LIMITS.SYNC_SECOND_PASS_MS);
+      const asked = () => t.sentTo(WireType.LEASESET_SYNC_REQ).map(m => m.to).filter(p => p !== A);
+      expect(asked()).toHaveLength(1);
+      vi.advanceTimersByTime(LEASESET_ROUTER_LIMITS.SYNC_PASS_WAIT_MS - 1);
+      expect(asked()).toHaveLength(1);
+      vi.advanceTimersByTime(1);
+      expect(asked()).toHaveLength(2);
+      expect(new Set(asked()).size).toBe(2); // 同じ相手には頼まない
+      // 頼んだ相手が切れても、待たずに次へ
+      t.pm.emit('peer:disconnect', asked()[1]);
+      expect(asked()).toHaveLength(3);
+      expect(new Set(asked()).size).toBe(3);
+      t.router.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('★別の隣人の写しが手持ちと同じで、網が立ち上がり済みなら止める。新しく入った・相手の方が知らないなら、間隔を空けて次へ (上限あり)', () => {
+    vi.useFakeTimers();
+    try {
+      // 1 時間前に出された leaseSet (網は立ち上がり済み)。バイト列は先に作っておく (同じものは同じバイト列)
+      const nowMin = msToMinutes(Date.now());
+      const L = [1, 2, 3].map(i => lease(sids[i], { expiresMin: nowMin + 300 }));
+      const D = pid(0xd), E = pid(0xe);
+      const start = (first: Uint8Array[]) => {
+        const t = setup({ own: null });
+        for (const p of [A, B, C, D, E]) t.pm.addPeer(p);
+        t.dandelion.set(A);
+        t.dispatcher.dispatch(A, WireType.LEASESET_SYNC, { leaseSets: first });
+        vi.advanceTimersByTime(LEASESET_ROUTER_LIMITS.SYNC_SECOND_PASS_MS);
+        const asked = () => t.sentTo(WireType.LEASESET_SYNC_REQ).map(m => m.to).filter(p => p !== A);
+        const answer = (sets: Uint8Array[]) => {
+          t.dispatcher.dispatch(asked().at(-1)!, WireType.LEASESET_SYNC, { leaseSets: sets });
+          vi.advanceTimersByTime(LEASESET_ROUTER_LIMITS.SYNC_PASS_IDLE_MS);
+        };
+        return { t, asked, answer };
+      };
+
+      // 1 ホップ目の写しが揃っていた: 2 回目の写しは手持ちと同じ → 1 回で止める (集め終わった網での普段の動き)
+      const v = start([L[0], L[1]]);
+      expect(v.asked()).toHaveLength(1);
+      v.answer([L[0], L[1]]);
+      vi.advanceTimersByTime(10 * LEASESET_ROUTER_LIMITS.SYNC_SECOND_PASS_MS);
+      expect(v.asked()).toHaveLength(1);
+
+      const t = start([L[0]]);
+      expect(t.asked()).toHaveLength(1);
+      t.answer([L[0], L[1]]); // L[1] が新しい → 間隔を空けてもう 1 回
+      vi.advanceTimersByTime(LEASESET_ROUTER_LIMITS.SYNC_SECOND_PASS_MS - 1);
+      expect(t.asked()).toHaveLength(1);
+      vi.advanceTimersByTime(1);
+      expect(t.asked()).toHaveLength(2);
+      expect(t.t.store.size).toBe(2);
+      t.answer([L[0]]); // 新しいものは無いが、相手の方が知らない (揃った証拠にならない) → もう 1 回
+      vi.advanceTimersByTime(LEASESET_ROUTER_LIMITS.SYNC_SECOND_PASS_MS);
+      expect(t.asked()).toHaveLength(3);
+      t.answer([L[0], L[1], L[2]]); // また新しいものが入ったが、上限 (SYNC_PASS_MAX)
+      vi.advanceTimersByTime(10 * LEASESET_ROUTER_LIMITS.SYNC_SECOND_PASS_MS);
+      expect(t.asked()).toHaveLength(LEASESET_ROUTER_LIMITS.SYNC_PASS_MAX);
+      expect(new Set(t.asked()).size).toBe(3);
+      expect(t.t.router.stats.secondPass).toBe(3);
+      for (const x of [v.t, t.t]) x.router.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('★網が立ち上がったばかり (知っている leaseSet がどれも 10 分以内に出された) なら、写しが手持ちと同じでも上限まで別の隣人に頼む', () => {
+    vi.useFakeTimers();
+    try {
+      // 同じ頃に参加した端末どうしは欠け方も同じ: 「新しいものが無かった」は揃った証拠にならない
+      const F = [1, 2].map(i => lease(sids[i]));
+      const t = setup({ own: null });
+      const D = pid(0xd);
+      for (const p of [A, B, C, D]) t.pm.addPeer(p);
+      t.dandelion.set(A);
+      t.dispatcher.dispatch(A, WireType.LEASESET_SYNC, { leaseSets: F });
+      const asked = () => t.sentTo(WireType.LEASESET_SYNC_REQ).map(m => m.to).filter(p => p !== A);
+      for (let i = 1; i <= LEASESET_ROUTER_LIMITS.SYNC_PASS_MAX; i++) {
+        vi.advanceTimersByTime(LEASESET_ROUTER_LIMITS.SYNC_SECOND_PASS_MS);
+        expect(asked()).toHaveLength(i);
+        t.dispatcher.dispatch(asked().at(-1)!, WireType.LEASESET_SYNC, { leaseSets: F });
+        vi.advanceTimersByTime(LEASESET_ROUTER_LIMITS.SYNC_PASS_IDLE_MS);
+      }
+      vi.advanceTimersByTime(10 * LEASESET_ROUTER_LIMITS.SYNC_SECOND_PASS_MS);
+      expect(asked()).toHaveLength(LEASESET_ROUTER_LIMITS.SYNC_PASS_MAX);
+      t.router.destroy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('握手前 (未検証) の 1 ホップ目には頼まない。検証されたら頼む', () => {
     const t = setup({ own: null });
     t.pm.addPeer(A, { isVerified: false });
@@ -391,11 +574,16 @@ describe('LeaseSetRouter: 新参者への一括送信 (SYNC)', () => {
     t.router.destroy();
   });
 
-  it('手持ちが空なら何も送らない', () => {
-    const t = setup({ own: null });
+  it('★手持ちが空なら何も送らず、応答したことにもしない (集まったあとの頼み直しには、間隔を待たずに応える)', () => {
+    // エミュレーターで、参加したばかりの 1 ホップ目が空のまま「応答済み」にし、相手の頼み直しを 1 分間捨てて、相手が 80 秒埋まらなかった
+    const t = setup({ own: null, router: { syncMinIntervalMs: 60_000 } });
     t.pm.addPeer(A);
     t.dispatcher.dispatch(A, WireType.LEASESET_SYNC_REQ, {});
     expect(t.sentTo(WireType.LEASESET_SYNC)).toHaveLength(0);
+    t.store.add(fakeLeaseSet(1));
+    t.dispatcher.dispatch(A, WireType.LEASESET_SYNC_REQ, {});
+    expect(t.sentTo(WireType.LEASESET_SYNC, A)).toHaveLength(1);
+    t.router.destroy();
   });
 
   it('★受信: 頼んだ相手の SYNC だけ受け取り、検証して手元に入れる。中継はしない。頼んでいない相手のものは無視', () => {

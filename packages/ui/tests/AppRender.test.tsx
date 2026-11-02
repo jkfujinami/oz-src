@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import React from 'react';
+import { t } from '../src/i18n';
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 import { render, screen, cleanup, fireEvent, waitFor, act } from '@testing-library/react';
 import sodium from 'libsodium-wrappers-sumo';
@@ -164,8 +165,8 @@ describe('Desktop UI Rendering & Workflows (OZ Specification)', () => {
       );
 
       expect(screen.getByText('板: 雑談')).toBeTruthy();
-      const newThreadBtn = screen.getByText('新スレを立てる');
-      expect(newThreadBtn).toBeTruthy();
+      // 見出しのボタン (一覧が空と分かったあとは、空の表示の中にも出る)
+      expect(screen.getAllByText('新スレを立てる')[0]).toBeTruthy();
     });
 
     it('新スレを立てるボタンをクリックするとフォームが展開され、中止で閉じることができる', () => {
@@ -175,17 +176,11 @@ describe('Desktop UI Rendering & Workflows (OZ Specification)', () => {
         </P2PProvider>,
       );
 
-      const newThreadBtn = screen.getByText('新スレを立てる');
-      fireEvent.click(newThreadBtn);
+      fireEvent.click(screen.getAllByText('新スレを立てる')[0]);
+      expect(screen.getByPlaceholderText('スレッドタイトル...')).toBeTruthy();
 
-      expect(screen.getByText('新規スレッド作成')).toBeTruthy();
-      const textarea = screen.getByPlaceholderText('スレッドタイトル...');
-      expect(textarea).toBeTruthy();
-
-      const cancelBtn = screen.getByText('中止');
-      fireEvent.click(cancelBtn);
-
-      expect(screen.queryByText('新規スレッド作成')).toBeNull();
+      fireEvent.click(screen.getByText('中止'));
+      expect(screen.queryByPlaceholderText('スレッドタイトル...')).toBeNull();
     });
 
     it('スレッドタイトルが空の場合は作成ボタンが無効化される', () => {
@@ -195,7 +190,7 @@ describe('Desktop UI Rendering & Workflows (OZ Specification)', () => {
         </P2PProvider>,
       );
 
-      fireEvent.click(screen.getByText('新スレを立てる'));
+      fireEvent.click(screen.getAllByText('新スレを立てる')[0]);
       const submitBtn = screen.getByText('作成') as HTMLButtonElement;
       expect(submitBtn.disabled).toBe(true);
 
@@ -305,7 +300,7 @@ describe('Desktop UI Rendering & Workflows (OZ Specification)', () => {
     it('初回設定で「パスワードを作る」を押すと、確認欄にも入り、強さの目安が出る', async () => {
       render(<App />);
       await waitFor(() => screen.getByText('パスワードを設定'));
-      fireEvent.click(screen.getByText('パスワードを作る'));
+      fireEvent.click(screen.getByText(t('unlock.generate')));
       const shown = screen.getByLabelText('作成したパスワード').textContent!;
       expect(shown.length).toBeGreaterThanOrEqual(12);
       expect((screen.getByLabelText('パスワード') as HTMLInputElement).value).toBe(shown);

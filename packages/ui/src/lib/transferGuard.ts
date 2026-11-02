@@ -1,3 +1,5 @@
+import { t } from '../i18n';
+
 /**
  * 進行中の転送 (アップロード・ダウンロード) の数。
  *
@@ -17,7 +19,7 @@ export const activeTransfers = () => active;
 
 export function confirmLeave(): boolean {
   if (active === 0) return true;
-  return window.confirm('ファイルの送受信が進行中です。離れると中止され、最初からやり直しになります。離れますか?');
+  return window.confirm(t('transfer.confirmLeave'));
 }
 
 const onBeforeUnload = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ''; };

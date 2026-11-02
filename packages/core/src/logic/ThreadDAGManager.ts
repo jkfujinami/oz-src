@@ -468,9 +468,26 @@ export class ThreadDAGManager {
    * 隠れる投稿も数える (解析が全体を持つ)。
    */
   public getAncestorCount(id: string): number | null {
-    const a = this.analyze();
-    const r = a.index.get(id);
-    return r === undefined ? null : a.n[r];
+    // ★ 解析が古い (投稿が増えた直後) ときは、全体を解析し直さずに親を辿って数える。
+    //   届いた投稿を保存するたびに呼ばれるので、毎回 analyze すると 1000 レスの取り込みで解析が 1000 回になる
+    if (!this.cache) return this.countAncestors(id);
+    const r = this.cache.index.get(id);
+    return r === undefined ? null : this.cache.n[r];
+  }
+
+  /** 親を辿って n(p) を数える (analyze の n と同じ値。手元に無い親・自分自身を指す親は数えない) */
+  private countAncestors(id: string): number | null {
+    if (!this.nodes.has(id)) return null;
+    const seen = new Set<string>([id]);
+    const stack = [id];
+    while (stack.length > 0) {
+      for (const q of this.nodes.get(stack.pop()!)!.parents) {
+        if (seen.has(q) || !this.nodes.has(q)) continue;
+        seen.add(q);
+        stack.push(q);
+      }
+    }
+    return seen.size;
   }
 
   public getCount(): number {

@@ -3,6 +3,7 @@ import { FileTransferError, sanitizeFileName, sanitizeMime, type FileLink } from
 import { useP2P } from '../providers/P2PProvider';
 import { canPreview, formatBytes, maxFileBytes } from '../lib/fileLimits';
 import { beginTransfer } from '../lib/transferGuard';
+import { t, useT } from '../i18n';
 
 type Dl =
   | { kind: 'idle' }
@@ -13,15 +14,15 @@ type Dl =
 function describeDownloadError(e: unknown): string {
   if (e instanceof FileTransferError) {
     switch (e.code) {
-      case 'no-first-hop': return 'まだ網につながっていません。少し待ってから、もう一度お試しください。';
+      case 'no-first-hop': return t('fileCard.noFirstHop');
       case 'bad-link':
-      case 'bad-manifest': return 'このリンクは読めませんでした。';
+      case 'bad-manifest': return t('fileCard.badLink');
       case 'unavailable':
-      case 'no-holders': return 'ファイルが見つかりませんでした。保持期間が過ぎたか、預け先が落ちている可能性があります。';
-      default: return '取得に失敗しました。もう一度お試しください。';
+      case 'no-holders': return t('fileCard.unavailable');
+      default: return t('fileCard.failed');
     }
   }
-  return '取得に失敗しました。もう一度お試しください。';
+  return t('fileCard.failed');
 }
 
 /**
@@ -32,6 +33,7 @@ function describeDownloadError(e: unknown): string {
  * ★ 取りかけ・取り終えた中身はこのコンポーネントのメモリ (Blob) だけ。画面を離れると捨てる。
  */
 export function FileCard({ token, link }: { token: string; link: FileLink }) {
+  const t = useT();
   const { node } = useP2P();
   const [state, setState] = useState<Dl>({ kind: 'idle' });
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -53,7 +55,7 @@ export function FileCard({ token, link }: { token: string; link: FileLink }) {
   }, []);
 
   const start = async () => {
-    if (!node) { setState({ kind: 'error', message: '準備ができていません。' }); return; }
+    if (!node) { setState({ kind: 'error', message: t('fileCard.notReady') }); return; }
     const end = beginTransfer();
     let name: string | null = null;
     setState({ kind: 'running', phase: 'manifest', done: 0, name: null });
@@ -65,7 +67,7 @@ export function FileCard({ token, link }: { token: string; link: FileLink }) {
       });
     } catch {
       end();
-      setState({ kind: 'error', message: '取得を始められませんでした。' });
+      setState({ kind: 'error', message: t('fileCard.startFailed') });
       return;
     }
     cancelRef.current = () => dl.cancel();
@@ -113,7 +115,7 @@ export function FileCard({ token, link }: { token: string; link: FileLink }) {
   const percent = state.kind === 'running' ? Math.min(100, Math.floor((state.done / link.size) * 100)) : 0;
   const title = state.kind === 'running' && state.name ? state.name
     : state.kind === 'done' ? state.name
-    : `添付ファイル (${formatBytes(link.size)})`;
+    : t('fileCard.title', { size: formatBytes(link.size) });
 
   return (
     <div className="card file-card" data-testid="file-card">
@@ -122,7 +124,7 @@ export function FileCard({ token, link }: { token: string; link: FileLink }) {
           <span className="file-icon" aria-hidden="true">📎</span>
           <span className="strong break">{title}</span>
           {(state.kind === 'running' || state.kind === 'done') && (
-            <span className="muted" style={{ flex: 'none' }}> ({formatBytes(link.size)})</span>
+            <span className="muted" style={{ flex: 'none' }}>{t('fileCard.sizeNote', { size: formatBytes(link.size) })}</span>
           )}
         </span>
         <div style={{ flex: 'none' }}>
@@ -132,36 +134,36 @@ export function FileCard({ token, link }: { token: string; link: FileLink }) {
               className="btn btn-sm btn-primary"
               disabled={tooBig}
               onClick={() => void start()}
-              aria-label={`添付ファイルを取得 (${formatBytes(link.size)})`}
+              aria-label={t('fileCard.getLabel', { size: formatBytes(link.size) })}
             >
-              取得
+              {t('fileCard.get')}
             </button>
           )}
           {state.kind === 'running' && (
-            <button type="button" className="btn btn-sm" onClick={() => cancelRef.current?.()}>中止</button>
+            <button type="button" className="btn btn-sm" onClick={() => cancelRef.current?.()}>{t('fileCard.cancel')}</button>
           )}
           {state.kind === 'done' && (
-            <button type="button" className="btn btn-sm btn-primary" onClick={save} aria-label={`${state.name} を保存`}>
-              保存
+            <button type="button" className="btn btn-sm btn-primary" onClick={save} aria-label={t('fileCard.saveLabel', { name: state.name })}>
+              {t('fileCard.save')}
             </button>
           )}
         </div>
       </div>
       {tooBig && state.kind === 'idle' && (
         <div className="alert alert-warn" style={{ marginTop: 8 }}>
-          大きすぎて、このブラウザでは取得できません (上限 {formatBytes(maxFileBytes())})。デスクトップ版をお使いください。
+          {t('fileCard.tooBig', { limit: formatBytes(maxFileBytes()) })}
         </div>
       )}
       {state.kind === 'idle' && !tooBig && (
         <div className="xsmall muted" style={{ marginTop: 6 }}>
-          取得すると、最初の中継先にはファイルを取っていることが見えます。
+          {t('fileCard.visibleNote')}
         </div>
       )}
       {state.kind === 'running' && (
         <div style={{ marginTop: 10 }}>
           <div
             role="progressbar"
-            aria-label="取得の進み具合"
+            aria-label={t('fileCard.progressLabel')}
             aria-valuemin={0}
             aria-valuemax={100}
             aria-valuenow={percent}
@@ -170,7 +172,7 @@ export function FileCard({ token, link }: { token: string; link: FileLink }) {
             <span style={{ width: `${percent}%` }} />
           </div>
           <div className="xsmall muted" style={{ marginTop: 4 }}>
-            {state.phase === 'manifest' ? '情報を取得中' : `取得中 (${percent}%)`}
+            {state.phase === 'manifest' ? t('fileCard.fetchingInfo') : t('fileCard.fetching', { percent })}
           </div>
         </div>
       )}

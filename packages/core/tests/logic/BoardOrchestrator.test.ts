@@ -125,6 +125,7 @@ describe('BoardOrchestrator', () => {
 
       await waitFor(() => h.board.getStatus().phase === 'error');
       expect(h.board.getStatus().message).toContain('平文での送信は行っていません');
+      expect(h.board.getStatus().code).toBe('no-anonymous-route');
       expect(h.pm.sendMessage).not.toHaveBeenCalled();
     });
 
@@ -182,6 +183,32 @@ describe('BoardOrchestrator', () => {
       const pkt = await buildReplyPacket(boardKey, BOARD, 'thread0001', 'レス', customSigner());
       await h.router.deliver(pkt);
       expect(h.board.getThreads()).toHaveLength(0);
+    });
+
+    it('まとめて届いたスレ立て (過去ログの 1 回の応答) は、DB のスレの統計を 1 回だけ読み、通知も 1 回にまとめる', async () => {
+      const pkts = [];
+      for (let i = 0; i < 10; i++) {
+        pkts.push(await buildThreadMetaPacket(boardKey, BOARD, `bulk0000${String(i).padStart(2, '0')}`, `まとめて${i}`, customSigner()));
+      }
+      const notified = vi.fn();
+      h.board.subscribe(notified);
+      const getThreads = vi.spyOn(h.db, 'getThreads');
+      await Promise.all(pkts.map(p => h.router.deliver(p)));
+      expect(h.board.getThreads()).toHaveLength(10);
+      expect(getThreads).toHaveBeenCalledTimes(1);
+      expect(notified).toHaveBeenCalledTimes(1);
+      expect(await h.db.getPosts(BOARD, BOARD_META_THREAD_ID)).toHaveLength(10);
+    });
+
+    it('一覧のスレは、端末が知っている最後の投稿の時刻 (DB のスレの統計) を持つ。知らなければ持たない', async () => {
+      const last = Date.now() - 60_000;
+      await h.db.touchThread(BOARD, 'lastpost01', last);
+      await h.board.activate(BOARD, boardKey);
+      await h.router.deliver(await buildThreadMetaPacket(boardKey, BOARD, 'lastpost01', '開いたことのあるスレ', customSigner()));
+      await h.router.deliver(await buildThreadMetaPacket(boardKey, BOARD, 'lastpost02', '開いたことのないスレ', customSigner()));
+      const byId = new Map(h.board.getThreads().map(t => [t.thread_id, t]));
+      expect(byId.get('lastpost01')?.last_post_at).toBe(last);
+      expect(byId.get('lastpost02')?.last_post_at).toBeUndefined();
     });
 
     it('同じパケットが何度届いても通知は 1 回', async () => {
@@ -242,9 +269,10 @@ describe('BoardOrchestrator', () => {
       h.catchup.active = true;
       await h.board.activate(BOARD, boardKey);
       await vi.advanceTimersByTimeAsync(20_000);
-      expect(h.board.getStatus()).toMatchObject({ phase: 'syncing', message: '過去ログを取得中...' });
+      expect(h.board.getStatus()).toMatchObject({ phase: 'syncing', code: 'history-fetching', message: '過去ログを取得中...' });
       h.catchup.set(false);
       expect(h.board.getStatus().message).toContain('見つかりませんでした');
+      expect(h.board.getStatus().code).toBe('board-empty');
     });
 
     it('板を切り替えると一覧は空になり、前の板のパケットは取り込まない', async () => {
@@ -363,6 +391,20 @@ describe('BoardOrchestrator', () => {
       // DB から読んだ分は書き戻さない
       expect(await db2.getPosts(BOARD, BOARD_META_THREAD_ID)).toHaveLength(2);
       second.board.clear();
+    });
+
+    it('★板を切り替えた直後に前の板の鍵で開きかけても (画面の 1 回の描画)、正しい鍵で開き直せば保存済みのスレッドが出る', async () => {
+      // 不具合: 雑談 → ファイル共有と切り替えると「過去ログを取得中」のあと「見つかりませんでした」になり、一覧が空のまま。
+      //   前の板の鍵での読み込みが、新しい板の投稿に「見た」の印だけを付け、正しい鍵で読み直しても全部落ちていた
+      await h.board.activate(OTHER_BOARD, otherKey);
+      await h.router.deliver(await buildThreadMetaPacket(otherKey, OTHER_BOARD, 'switch0001', 'ファイル共有のスレ', customSigner()));
+      h.board.clear();
+
+      const stale = h.board.activate(OTHER_BOARD, boardKey); // 新しい板 ID + 前の板の鍵 (待たない)
+      h.board.clear(); // 画面が鍵を解決し直して開き直す
+      await h.board.activate(OTHER_BOARD, otherKey);
+      await stale;
+      expect(h.board.getThreads().map(t => t.content)).toEqual(['ファイル共有のスレ']);
     });
 
     it('DB に保存済みでも、違う板の鍵で開くと何も復元されない', async () => {

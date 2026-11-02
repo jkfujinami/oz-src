@@ -1,6 +1,6 @@
 import type { IPeerConnection, PeerId } from '../types';
 import { RingPosition } from './RingPosition';
-import { ChunkedSender } from './stream/ChunkedSender';
+import { ChunkedSender, isBulkFrame } from './stream/ChunkedSender';
 import { ChunkedReceiver } from './stream/ChunkedReceiver';
 import { createLogger } from '../common/Logger';
 import { netGroupOf, originKeyOf, ORIGIN_LAN, ORIGIN_UNKNOWN } from './NetGroup';
@@ -230,6 +230,7 @@ export class WebRTCPeer implements IPeerConnection {
 
     channel.onclose = () => {
       log.debug(`DataChannel closed with ${this.peerId}`);
+      this.chunkedSender.clear();
       this._connected = false;
       this._connecting = false;
       this.opts.onDisconnect();
@@ -305,22 +306,27 @@ export class WebRTCPeer implements IPeerConnection {
     }
   }
 
-  /** DataChannel の送信待ちのバイト数 (送り手が送出を絞るのに使う) */
+  /** 送信待ちのバイト数 (DataChannel の送信待ち + ChunkedSender の手元の列。送り手が送出を絞るのに使う) */
   public get bufferedAmount(): number {
-    return this.channel?.bufferedAmount ?? 0;
+    return (this.channel?.bufferedAmount ?? 0) + this.chunkedSender.queuedBytes;
   }
 
   public send(msg: Uint8Array | string): void {
     if (!this.channel || this.channel.readyState !== 'open') return;
-    if (typeof msg === 'string') {
-      this.channel.send(msg);
-      return;
-    }
-    // Use ChunkedSender: messages <= 4KB go through in one send(),
-    // larger messages (e.g. DHT sync responses) are split into 4KB chunks.
-    this.chunkedSender.send(this.channel, msg).catch((e) => {
+    try {
+      if (typeof msg === 'string') {
+        this.channel.send(msg);
+        return;
+      }
+      // 16KiB 以下は 1 回で送る (正規のフレームは全部これ)。大きなデータの系統は送信待ちを見て手元の列で絞る
+      const sctpMax = this.pc.sctp?.maxMessageSize;
+      this.chunkedSender.send(this.channel, msg, {
+        bulk: isBulkFrame(msg[0]),
+        maxMessageBytes: typeof sctpMax === 'number' && sctpMax > 0 ? sctpMax : undefined,
+      });
+    } catch (e) {
       log.error(`ChunkedSend failed`, e);
-    });
+    }
   }
 
   /**
@@ -354,6 +360,7 @@ export class WebRTCPeer implements IPeerConnection {
     this._connected = false;
     this._connecting = false;
     this.chunkedReceiver.destroy();
+    this.chunkedSender.clear();
     if (this.channel) this.channel.close();
     this.pc.close();
   }

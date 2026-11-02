@@ -411,7 +411,8 @@ describe('C4: Guard の上り制限 (TUNNEL_SEND)', () => {
     });
     const data = randBytes(1024 * 1024);
     const up = new FileUploader(net.uploaderParts({ limits: { busyRetries: 0, rounds: 1, fragmentRetries: 0 } }), data, { name: 'x', mime: 'text/plain' }).start();
-    await expect(up.link).rejects.toMatchObject({ code: 'insufficient-replicas' });
+    // 画面の説明に使う数 (置けた別々の保持者の数と、必要な数) が載る
+    await expect(up.link).rejects.toMatchObject({ code: 'insufficient-replicas', replicas: { needed: 3 } });
     expect(net.g1.relay.stats.dropped.bytes).toBeGreaterThan(0);
     // 枠を超えた分は保持者まで届いていない: g1 が受け口へ流した量は 枠 (200KB) + 補充の分だけ
     const forwarded = net.g1.relay.stats.forwarded.requests;

@@ -3,18 +3,19 @@ import type { GossipRouter } from '../network/gossip/GossipRouter';
 import type { CatchupProgress } from '../network/history/CatchupClient';
 import type { HistoryFetcher } from '../network/history/HistoryClient';
 import { HistorySession, type HistoryJob } from './HistorySession';
+import { HistoryMarks, HISTORY_MARKS_BOARD } from './HistoryMarks';
 import { boardTag, dayOf, mondayOf } from '../crypto/PacketTag';
 import type { CryptoEngine } from '../crypto/CryptoEngine';
 import type { Identity } from '../crypto/Identity';
 import type { IPeerManager, IPoWEngine } from '../types';
 import type { ThreadMeta } from './types';
 import { PacketBuilder } from '../crypto/PacketBuilder';
-import { MINUTE_MS, estimateSolveMs, msToMinutes } from '../crypto/PowPolicy';
+import { estimateSolveMs } from '../crypto/PowPolicy';
 import { CONGESTION_NOTICE, SLOW_POW_NOTICE_MS } from './PowNotice';
 import { encodePacket, decodePacket } from '../crypto/PacketCodec';
 import { assertPostLimits } from '../crypto/PostCodec';
 import { THREAD_LIMITS, THREAD_ID_RANDOM_CHARS, makeThreadId, threadBirthFromId, isThreadMetaTimeConsistent } from './ThreadLimits';
-import { BOARD_META_THREAD_ID, BoardStatus } from './types';
+import { BOARD_META_THREAD_ID, NO_STATUS, type BoardStatus, type StatusText } from './types';
 import { createLogger } from '../common/Logger';
 import { CryptoUtils } from '../common/CryptoUtils';
 
@@ -39,8 +40,15 @@ export class BoardOrchestrator {
    */
   private snapshot: ThreadMeta[] = [];
   private seenPacketIds: Set<string> = new Set();
-  private currentStatus: BoardStatus = { phase: 'idle', message: '' };
+  private currentStatus: BoardStatus = { phase: 'idle', code: 'none', message: '' };
   private statsTimer: any = null;
+  /** 届いたスレ立ての通知をまとめて出す印 (queueNotify) */
+  private notifyQueued = false;
+  /**
+   * DB のスレの統計 (threadId → max_pow)。届いたスレ立てごとに DB の全件を読んで復号し直すと、
+   * スレ数の 2 乗になる (DB からの読み込み・過去ログの取得)。startStatsSync が読み直すたびに差し替え、板を切り替えたら捨てる。
+   */
+  private powCache: { boardId: string; byThread: Promise<Map<string, ThreadStat>> } | null = null;
 
   private currentBoardId: string | null = null;
   private currentBoardKey: Uint8Array | null = null;
@@ -64,11 +72,13 @@ export class BoardOrchestrator {
   private unsubCatchup: (() => void) | null = null;
   /** 保管担当からの過去ログの取得 (開いたとき 1 回と、1 ホップ目の再接続のとき) */
   private historySession: HistorySession;
+  /** 週ごとの「保持者から取り切った時刻」(次に開いたときの since) */
+  private historyMarks: HistoryMarks;
 
   /** 板のスレ立て (週単位のバケット) を何週間前まで取るか。スレの寿命 (90 日) を覆う */
   public static readonly HISTORY_WEEKS = 13;
-  /** 週別の取得の同時数 */
-  public static readonly HISTORY_CONCURRENCY = 3;
+  /** 週別の取得の同時数: 全週を一度に (相手の混み具合は HistoryClient の受け口ごとの枠と BUSY の頼み直しで抑える) */
+  public static readonly HISTORY_CONCURRENCY = 13;
 
   constructor(
     private pm: IPeerManager,
@@ -88,7 +98,10 @@ export class BoardOrchestrator {
      */
     history: HistoryFetcher | null = null,
   ) {
-    this.historySession = new HistorySession(history, () => this.refreshEmptyStatus());
+    this.historyMarks = new HistoryMarks(db, HISTORY_MARKS_BOARD);
+    this.historySession = new HistorySession(history, () => this.refreshEmptyStatus(), (job, startedAt) => {
+      if (this.currentBoardId) void this.historyMarks.complete(this.currentBoardId, job.birthDay, job.tag, startedAt);
+    });
   }
 
   /**
@@ -118,15 +131,16 @@ export class BoardOrchestrator {
     return this.currentStatus;
   }
 
-  private updateStatus(phase: BoardStatus['phase'], message: string, isSubmitting: boolean = false, powProgress: number = 0) {
+  private updateStatus(phase: BoardStatus['phase'], text: StatusText, isSubmitting: boolean = false, powProgress: number = 0) {
+    const { code, message, params } = text;
     const cur = this.currentStatus;
     // 同じ内容なら通知しない。空判定の再評価は頻繁に走るので、
     // ここで畳まないと無意味な再描画が積み上がる。
-    if (cur.phase === phase && cur.message === message &&
+    if (cur.phase === phase && cur.code === code && cur.message === message &&
         (cur.isSubmitting ?? false) === isSubmitting && (cur.powProgress ?? 0) === powProgress) {
       return;
     }
-    this.currentStatus = { phase, message, isSubmitting, powProgress };
+    this.currentStatus = params ? { phase, code, params, message, isSubmitting, powProgress } : { phase, code, message, isSubmitting, powProgress };
     this.statusListeners.forEach(l => l());
   }
 
@@ -154,18 +168,18 @@ export class BoardOrchestrator {
 
     // 保管担当から過去ログを取っている間は、その旨を出す (スレが届いても、取り終わるまで残す)
     if (this.historySession.active && this.pm.degree > 0) {
-      this.updateStatus('syncing', this.historySession.message());
+      this.updateStatus('syncing', this.historySession.status());
       return;
     }
 
     if (this.threads.size > 0) {
-      this.updateStatus('idle', '');
+      this.updateStatus('idle', NO_STATUS);
       return;
     }
 
     if (this.pm.degree === 0) {
       this.firstPeerAt = null;
-      this.updateStatus('loading', '隣人を探しています (接続中)...');
+      this.updateStatus('loading', { code: 'connecting-neighbors', message: '隣人を探しています (接続中)...' });
       return;
     }
 
@@ -173,12 +187,12 @@ export class BoardOrchestrator {
     const remaining = BoardOrchestrator.EMPTY_VERDICT_GRACE_MS - (Date.now() - this.firstPeerAt);
 
     if (this.catchup?.active) {
-      this.updateStatus('syncing', '過去ログを取得中...');
+      this.updateStatus('syncing', { code: 'history-fetching', message: '過去ログを取得中...' });
       return; // 終わったら onChange で再評価される
     }
 
     if (remaining > 0) {
-      this.updateStatus('syncing', `${this.pm.degree}人の隣人と同期中...`);
+      this.updateStatus('syncing', { code: 'syncing-neighbors', params: { degree: this.pm.degree }, message: `${this.pm.degree}人の隣人と同期中...` });
       this.emptyVerdictTimer = setTimeout(() => {
         this.emptyVerdictTimer = null;
         this.refreshEmptyStatus();
@@ -186,7 +200,7 @@ export class BoardOrchestrator {
       return;
     }
 
-    this.updateStatus('idle', 'スレッドが見つかりませんでした。一番乗りで立ててみませんか？');
+    this.updateStatus('idle', { code: 'board-empty', message: 'スレッドが見つかりませんでした。一番乗りで立ててみませんか？' });
   }
 
 
@@ -200,6 +214,19 @@ export class BoardOrchestrator {
     this.snapshot = Array.from(this.threads.values());
     log.debug(() => `notify: ${this.snapshot.length} threads -> ${this.listeners.size} listener(s)`);
     this.listeners.forEach(l => l());
+  }
+
+  /**
+   * 届いたスレ立ての通知を、同じタスクの中で届いた分まとめて 1 回にする (マイクロタスクで出すので、届けた側が await を返す前に済む)。
+   * 過去ログの取得は 1 回の応答で多数のスレ立てを配るので、1 件ごとに再描画しない。自分のスレ立て・切り替えは notify を直接呼ぶ。
+   */
+  private queueNotify() {
+    if (this.notifyQueued) return;
+    this.notifyQueued = true;
+    queueMicrotask(() => {
+      this.notifyQueued = false;
+      this.notify();
+    });
   }
 
   /**
@@ -226,6 +253,12 @@ export class BoardOrchestrator {
     boardId: string, boardKey: Uint8Array, packet: any, isFromDB: boolean, rawData?: Uint8Array,
   ) {
     log.trace(() => `packet enter ${short(packet?.packet_id)} fromDB=${isFromDB}`);
+    // ★ 開いている板と違う (板 ID・鍵) 呼び出しは、「見た」の印を付ける前に捨てる。切り替えの前に始めた読み込みの続き
+    //   (前の板の鍵) が新しい板の投稿に印を付けると、正しい鍵で読み直しても全部「見た」で落ち、一覧が空になる
+    if (this.isStale(boardId, boardKey)) {
+      log.trace(() => `packet DROP (stale activation) ${short(packet?.packet_id)}`);
+      return;
+    }
     if (this.seenPacketIds.has(packet.packet_id)) {
       log.trace(() => `packet DROP (already seen) ${short(packet.packet_id)}`);
       return;
@@ -234,6 +267,7 @@ export class BoardOrchestrator {
     try {
       // ★ tag / age が「この板の、その日のスレ立て」でなければ、復号の前に落ちる
       const meta = await PacketBuilder.verifyAndDecrypt(packet, boardKey, { kind: 'meta', boardId }, this.cryptoEng);
+      if (this.isStale(boardId, boardKey)) return; // 復号を待つ間に板が切り替わった
       if (!meta) {
         log.debug(() => `packet DROP (tag/age/SIV/signature) ${short(packet.packet_id)}`);
         return;
@@ -256,11 +290,13 @@ export class BoardOrchestrator {
         log.trace(() => `packet DROP (thread past max lifetime) ${short(packet.packet_id)}`);
         return;
       }
-      const max_pow = await this.resolveMaxPow(boardId, meta);
-      const changed = this.mergeThread(meta, packet.packet_id, max_pow, created_at);
+      const stat = (await this.threadPows(boardId)).get(meta.thread_id);
+      // ★ 累積 PoW はワイヤに無い。スレ立て自体の熱量は 0 から始め、レスで DB の統計 (祖先数 n(p)) が積み上がる
+      const max_pow = stat ? Math.max(0, stat.max_pow) : 0;
+      const changed = this.mergeThread(meta, packet.packet_id, max_pow, created_at, stat?.last_post_at ?? null);
       log.debug(() => `merge thread=${short(meta.thread_id)} changed=${changed} total=${this.threads.size}`);
       if (changed) {
-        this.notify();
+        this.queueNotify();
         // 1 件でも届いたら「無い」の表示を消す
         this.refreshEmptyStatus();
       }
@@ -270,29 +306,42 @@ export class BoardOrchestrator {
     }
   }
 
+  /** 板を開いていて、それが (boardId, boardKey) の組と違うか。開いていなければ false (開く前の呼び出しは受ける) */
+  private isStale(boardId: string, boardKey: Uint8Array): boolean {
+    if (this.currentBoardId === null) return false;
+    return this.currentBoardId !== boardId || !sameBytes(this.currentBoardKey, boardKey);
+  }
+
   private normalizeTimestamp(raw: any): number {
     const n = Number(raw);
     return isFinite(n) && n > 0 ? n : Date.now();
   }
 
-  private async resolveMaxPow(boardId: string, meta: any): Promise<number> {
-    // ★ 累積 PoW はワイヤに無い。スレ立て自体の熱量は 0 から始め、レスで DB の統計 (祖先数 n(p)) が積み上がる
-    const base = 0;
-    const stats = await this.db.getThreads(boardId)
-      .then((list: any[]) => list.find((s: any) => s.threadId === meta.thread_id));
-    return stats ? Math.max(base, stats.max_pow || 0) : base;
+  /** DB のスレの統計 (threadId → max_pow・最後の投稿の時刻)。板ごとに 1 回だけ読む (powCache)。読めなければ次の呼び出しで読み直す */
+  private threadPows(boardId: string): Promise<Map<string, ThreadStat>> {
+    const cached = this.powCache;
+    if (cached && cached.boardId === boardId) return cached.byThread;
+    const byThread: Promise<Map<string, ThreadStat>> = this.db.getThreads(boardId)
+      .then(powMapOf)
+      .catch((e) => {
+        if (this.powCache?.byThread === byThread) this.powCache = null;
+        throw e;
+      });
+    this.powCache = { boardId, byThread };
+    return byThread;
   }
 
-  private mergeThread(meta: any, packetId: string, max_pow: number, created_at: number): boolean {
+  private mergeThread(meta: any, packetId: string, max_pow: number, created_at: number, last_post_at: number | null = null): boolean {
     const existing = this.threads.get(meta.thread_id);
     if (existing) {
       const mergedPow = Math.max(existing.max_pow || 0, max_pow);
       const mergedAt = isFinite(existing.created_at) && existing.created_at > 0
         ? existing.created_at : created_at;
-      if (mergedPow === existing.max_pow && mergedAt === existing.created_at) return false;
-      this.threads.set(meta.thread_id, { ...existing, max_pow: mergedPow, created_at: mergedAt });
+      const mergedLast = laterTime(existing.last_post_at, last_post_at);
+      if (mergedPow === existing.max_pow && mergedAt === existing.created_at && mergedLast === existing.last_post_at) return false;
+      this.threads.set(meta.thread_id, { ...existing, max_pow: mergedPow, created_at: mergedAt, last_post_at: mergedLast });
     } else {
-      this.threads.set(meta.thread_id, { ...meta, packet_id: packetId, max_pow, created_at });
+      this.threads.set(meta.thread_id, { ...meta, packet_id: packetId, max_pow, created_at, last_post_at: laterTime(undefined, last_post_at) });
     }
     return true;
   }
@@ -354,7 +403,7 @@ export class BoardOrchestrator {
 
     } catch (err) {
       log.error('[BoardOrchestrator] fullSync error:', err);
-      this.updateStatus('error', '最新スレッドの取得に失敗しました');
+      this.updateStatus('error', { code: 'latest-failed', message: '最新スレッドの取得に失敗しました' });
     }
   }
 
@@ -364,7 +413,9 @@ export class BoardOrchestrator {
   public startStatsSync(boardId: string) {
     this.stopStatsSync();
     this.statsTimer = setInterval(async () => {
-      const allStats = await this.db.getThreads(boardId).catch(() => []);
+      const allStats = await this.db.getThreads(boardId).catch(() => null);
+      if (!allStats) return;
+      if (this.currentBoardId === boardId) this.powCache = { boardId, byThread: Promise.resolve(powMapOf(allStats)) };
       if (allStats.length === 0) return;
 
       let changed = false;
@@ -376,9 +427,10 @@ export class BoardOrchestrator {
         const currentCreatedAt = (isFinite(t.created_at) && t.created_at > 0) ? t.created_at : 0;
         const dbCreatedAt = (isFinite(s.created_at) && s.created_at > 0) ? s.created_at : 0;
         const bestCreatedAt = currentCreatedAt > 0 ? currentCreatedAt : (dbCreatedAt > 0 ? dbCreatedAt : Date.now());
+        const newLast = laterTime(t.last_post_at, s.last_post_at);
 
-        if (newPow !== t.max_pow || bestCreatedAt !== t.created_at) {
-          this.threads.set(s.threadId, { ...t, max_pow: newPow, created_at: bestCreatedAt });
+        if (newPow !== t.max_pow || bestCreatedAt !== t.created_at || newLast !== t.last_post_at) {
+          this.threads.set(s.threadId, { ...t, max_pow: newPow, created_at: bestCreatedAt, last_post_at: newLast });
           changed = true;
         }
       }
@@ -432,10 +484,7 @@ export class BoardOrchestrator {
    */
   public async activate(boardId: string, boardKey: Uint8Array) {
     // 1. 板が切り替わった場合はリセット (同じ板 ID でも鍵が違えば別の板として扱う)
-    const sameKey = this.currentBoardKey !== null &&
-      this.currentBoardKey.length === boardKey.length &&
-      this.currentBoardKey.every((b, i) => b === boardKey[i]);
-    if (this.currentBoardId !== boardId || !sameKey) {
+    if (this.currentBoardId !== boardId || !sameBytes(this.currentBoardKey, boardKey)) {
       this.clear();
       this.currentBoardId = boardId;
       this.currentBoardKey = boardKey;
@@ -460,7 +509,8 @@ export class BoardOrchestrator {
     }
 
     // 3c. 保管担当から過去ログ (72 時間より古い分)。裏で取る: 画面は待たない
-    this.startHistoryFetch(boardId, boardKey);
+    await this.historyMarks.load(boardId);
+    if (this.currentBoardId === boardId) this.startHistoryFetch(boardId, boardKey);
 
     // 4. 初期ネットワーク同期
     await this.fullSync(boardId, boardKey);
@@ -470,35 +520,21 @@ export class BoardOrchestrator {
    * 板の直近 13 週のスレ立て (週単位のバケット) を、新しい週から順に保持者から取る (同時 3 本)。
    *
    * ★ スレ立ては週にまとめてある (PacketTag.metaTagAge): バケット = (月曜の日番号, 板の鍵の tag)。13 本で 90 日ぶんが取れる。
-   * ★ since: その週に手元のスレ立てが 1 件も無ければ 0 (全部)、あれば**その週で手元の最新のスレ立て − 5 分**。
-   *   開くたびに 13 週ぶんを丸ごと取り直さない。
+   * ★ since: その週を保持者から最後まで取り切った時刻 − 5 分 (HistoryMarks)。取り切った記録が無ければ 0 (全部)。
+   *   開くたびに 13 週ぶんを丸ごと取り直さない。手元の最新のスレ立ては基準にしない (追いつきで先に届いた新しいスレがあると、
+   *   その週の古いスレを取りに行かなくなる)。
    * ★ 取るのは開いたとき 1 回と、1 ホップ目の再接続のときだけ (HistorySession)。
    */
   private startHistoryFetch(boardId: string, boardKey: Uint8Array): void {
     this.historySession.start((): HistoryJob[] => {
       if (this.currentBoardId !== boardId) return [];
       const thisMonday = mondayOf(dayOf(Date.now()));
-      // 週ごとの手元の最新のスレ立て (ms)
-      const newestByWeek = new Map<number, number>();
-      for (const t of this.threads.values()) {
-        if (!(t.created_at > 0)) continue;
-        const monday = mondayOf(dayOf(t.created_at));
-        if (t.created_at > (newestByWeek.get(monday) ?? 0)) newestByWeek.set(monday, t.created_at);
-      }
       const jobs: HistoryJob[] = [];
       for (let i = 0; i < BoardOrchestrator.HISTORY_WEEKS; i++) {
-        const monday = thisMonday - 7 * i;
-        const newest = newestByWeek.get(monday);
-        let since = 0;
-        if (newest !== undefined) {
-          try {
-            since = Math.max(0, msToMinutes(newest - 5 * MINUTE_MS));
-          } catch {
-            since = 0;
-          }
-        }
         // birthDay = 投稿日 − age = その週の月曜
-        jobs.push({ birthDay: monday, tag: boardTag(boardKey, monday), since });
+        const monday = thisMonday - 7 * i;
+        const tag = boardTag(boardKey, monday);
+        jobs.push({ birthDay: monday, tag, since: this.historyMarks.since(monday, tag) });
       }
       return jobs;
     }, BoardOrchestrator.HISTORY_CONCURRENCY);
@@ -529,7 +565,7 @@ export class BoardOrchestrator {
     if (title) assertPostLimits({ postType: 1, boardId: '', threadId: '', parents: [], content: title });
     if (!title || !boardKey || !this.powEng || !this.identity || !this.cryptoEng || !this.router || !this.db) return null;
 
-    this.updateStatus('submitting', 'スレッドを構築中...', true, 30);
+    this.updateStatus('submitting', { code: 'building-thread', message: 'スレッドを構築中...' }, true, 30);
 
     try {
       // スレッド ID は網に出るので暗号論的乱数で作る (Math.random は状態を復元され得る)
@@ -544,12 +580,12 @@ export class BoardOrchestrator {
         onEffort: ({ effort }) => {
           // ★ 推奨 effort で重くなったときだけ、理由を一言添える (最低値は一瞬なので何も出さない)
           if (estimateSolveMs(effort) > SLOW_POW_NOTICE_MS) {
-            this.updateStatus('submitting', CONGESTION_NOTICE, true, 30);
+            this.updateStatus('submitting', { code: 'congestion', message: CONGESTION_NOTICE }, true, 30);
           }
         },
       });
 
-      this.updateStatus('submitting', '拡散中...', true, 100);
+      this.updateStatus('submitting', { code: 'spreading', message: '拡散中...' }, true, 100);
 
       const rawPacketData = encodePacket(packet);
 
@@ -589,11 +625,11 @@ export class BoardOrchestrator {
       // ── ここから先はネットワークへの送出。UI を待たせない。 ──
       this.sendAnonymously(packet);
 
-      this.updateStatus('idle', '', false, 0);
+      this.updateStatus('idle', NO_STATUS, false, 0);
       return threadId;
     } catch (err) {
       log.error('[BoardOrchestrator] submitThread error:', err);
-      this.updateStatus('error', 'スレッドの作成に失敗しました', false, 0);
+      this.updateStatus('error', { code: 'create-failed', message: 'スレッドの作成に失敗しました' }, false, 0);
       return null;
     }
   }
@@ -610,7 +646,7 @@ export class BoardOrchestrator {
     void (async () => {
       const delivered = await this.router.broadcast(packet);
       if (!delivered) {
-        this.updateStatus('error', '匿名経路で送信できませんでした (平文での送信は行っていません)。隣人が増えてから再度お試しください。');
+        this.updateStatus('error', { code: 'no-anonymous-route', message: '匿名経路で送信できませんでした (平文での送信は行っていません)。隣人が増えてから再度お試しください。' });
       }
     })().catch((err: any) => {
       log.error('[BoardOrchestrator] anonymous send failed:', err);
@@ -641,14 +677,42 @@ export class BoardOrchestrator {
     }
 
     this.historySession.reset();
+    this.historyMarks.clear();
     this.currentBoardId = null;
     this.currentBoardKey = null;
+    this.powCache = null;
     this.threads.clear();
     this.seenPacketIds.clear();
     this.notify();
   }
 
 
+}
+
+interface ThreadStat { max_pow: number; last_post_at: number | null }
+
+/** DB のスレの統計の一覧 → threadId ごとの max_pow と最後の投稿の時刻 (同じ threadId が重なれば先のもの) */
+function powMapOf(list: any[]): Map<string, ThreadStat> {
+  const out = new Map<string, ThreadStat>();
+  for (const s of list) {
+    if (!out.has(s.threadId)) out.set(s.threadId, { max_pow: s.max_pow || 0, last_post_at: isTime(s.last_post_at) ? s.last_post_at : null });
+  }
+  return out;
+}
+
+function isTime(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0;
+}
+
+/** 2 つの時刻の遅い方 (どちらも無ければ undefined) */
+function laterTime(a: unknown, b: unknown): number | undefined {
+  const x = isTime(a) ? a : 0;
+  const y = isTime(b) ? b : 0;
+  return x || y ? Math.max(x, y) : undefined;
+}
+
+function sameBytes(a: Uint8Array | null, b: Uint8Array): boolean {
+  return a !== null && a.length === b.length && a.every((x, i) => x === b[i]);
 }
 
 /** ログ用の短縮表示。undefined でも落ちないようにしておく */

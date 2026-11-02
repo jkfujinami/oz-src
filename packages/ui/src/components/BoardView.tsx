@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useBoard } from "../hooks/useBoard";
+import { lastActivity } from "../lib/threadOrder";
 import { useP2P } from "../providers/P2PProvider";
 import { needsWeakRouteConfirmation } from "../lib/guardStatus";
 import { WeakRouteConfirm } from "./WeakRouteConfirm";
@@ -13,6 +14,13 @@ import { copySecret } from "../lib/clipboard";
 import { byteBudget, describeSubmitError } from "../lib/postLimit";
 import { boardDisplayName } from "../lib/boardKeys";
 import { ThreadRanker, type ThreadMeta, createLogger } from "@oz/core";
+import { getBoardSort, setBoardSort, type BoardSort } from "../lib/boardSort";
+import { loadReadThreads } from "../lib/readThreads";
+import { relativeTime } from "../lib/relativeTime";
+import { formatDateTime, useT } from "../i18n";
+
+/** 「スレッドが見つかりませんでした」の表示 (取り終わってから) を出す段階 */
+const EMPTY_VERDICT_PHASE = 'idle';
 
 const log = createLogger('ui.board');
 
@@ -21,11 +29,27 @@ export default function BoardView({
 }: {
   boardId: string;
 }) {
-  const { threads, status, submitThread, powProgress, isSubmitting, shareCode } = useBoard(boardId);
+  const t = useT();
+  const { guardStatus, db } = useP2P();
+  const [sort, setSort] = useState<BoardSort>(getBoardSort);
+  const { threads, status, phase, submitThread, powProgress, isSubmitting, shareCode } = useBoard(boardId, sort);
   const [showForm, setShowForm] = useState(false);
+  const [read, setRead] = useState<Set<string> | null>(null);
+  // 相対時刻 (「3 分前」) を描き直すための時計
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, []);
+  useEffect(() => {
+    let cancelled = false;
+    setRead(null);
+    loadReadThreads(db, boardId).then((r) => { if (!cancelled) setRead(r); });
+    return () => { cancelled = true; };
+  }, [db, boardId]);
+  const changeSort = (s: BoardSort) => { setBoardSort(s); setSort(s); };
   const [titleInput, setTitleInput] = useState('');
   const [copied, setCopied] = useState(false);
-  const { guardStatus } = useP2P();
   const [confirming, setConfirming] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const budget = byteBudget(titleInput);
@@ -38,7 +62,7 @@ export default function BoardView({
     try {
       await submitThread(titleInput);
     } catch (e) {
-      setSubmitError(describeSubmitError(e, 'スレッドタイトル'));
+      setSubmitError(describeSubmitError(e, t('board.subject')));
     }
   };
 
@@ -68,125 +92,144 @@ export default function BoardView({
       <div className="page-head">
         <div>
           <div className="eyebrow">OZ P2P BOARD</div>
-          <h1 className="page-title">板: {boardDisplayName(boardId)}</h1>
+          <h1 className="page-title">{t('board.heading', { name: boardDisplayName(boardId) })}</h1>
         </div>
         <div className="row row-wrap">
           {shareCode && (
             <button
               className="btn btn-sm btn-ghost"
               onClick={copyShareCode}
-              title="この板の鍵を含みます。信頼できる相手にだけ渡してください"
+              title={t('board.shareTitle')}
             >
-              {copied ? 'コピーしました' : '共有コードをコピー'}
+              {copied ? t('board.copied') : t('board.copyShare')}
             </button>
           )}
           <button className="btn btn-sm btn-primary" onClick={() => setShowForm(true)}>
-            新スレを立てる
+            {t('board.newThread')}
           </button>
         </div>
       </div>
 
       {showForm && (
-        <div className="panel" style={{ marginBottom: 20 }}>
-          <div className="panel-head">
-            <div>
-              <h3 className="panel-title">新規スレッド作成</h3>
-              <p className="panel-desc">スレッドの先頭メッセージを入力してください。送信時に端末ローカルで Proof-of-Work (計算証明) を行います。</p>
-            </div>
-          </div>
-          <div className="input-group">
-            <textarea
-              autoComplete="off"
-              spellCheck={false}
-              autoCorrect="off"
-              autoCapitalize="off"
-              placeholder="スレッドタイトル..."
-              rows={3}
-              value={titleInput}
-              onChange={(e) => setTitleInput(e.target.value)}
-              disabled={isSubmitting}
-              autoFocus
-            />
-            <div className="row row-between row-wrap">
-              <PostLimitNote budget={budget} subject="スレッドタイトル" />
+        <div className="compose-inline">
+          <textarea
+            autoComplete="off"
+            spellCheck={false}
+            autoCorrect="off"
+            autoCapitalize="off"
+            placeholder={t('board.titlePlaceholder')}
+            rows={2}
+            value={titleInput}
+            onChange={(e) => setTitleInput(e.target.value)}
+            onKeyDown={(e) => {
+              // Ctrl+Enter (macOS は ⌘+Enter) で作成、Esc で閉じる
+              if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !isSubmitting && titleInput.trim()) {
+                e.preventDefault();
+                requestSubmit();
+              } else if (e.key === 'Escape' && !isSubmitting && confirmLeave()) {
+                setShowForm(false);
+              }
+            }}
+            disabled={isSubmitting}
+            autoFocus
+          />
+          <div className="compose-inline-foot">
+            <PostLimitNote budget={budget} subject={t('board.subject')} />
+            <div className="row row-wrap" style={{ gap: 8, justifyContent: 'flex-end' }}>
               <AttachControl
                 disabled={isSubmitting}
-                onInsert={(t) => { setTitleInput((prev) => appendToken(prev, t)); setSubmitError(null); }}
+                onInsert={(token) => { setTitleInput((prev) => appendToken(prev, token)); setSubmitError(null); }}
               />
-            </div>
-            <div className="row row-end" style={{ gap: 10, marginTop: 10 }}>
               <button className="btn btn-sm btn-ghost" onClick={() => { if (confirmLeave()) setShowForm(false); }} disabled={isSubmitting}>
-                中止
+                {t('board.cancel')}
               </button>
-              <button
-                className="btn btn-sm btn-primary"
-                disabled={isSubmitting || budget.over || !titleInput.trim()}
-                onClick={requestSubmit}
-              >
-                作成
-              </button>
+              {isSubmitting ? (
+                <button
+                  className="btn btn-sm btn-progress"
+                  disabled
+                  style={{ backgroundImage: `linear-gradient(to right, var(--surface-3) ${powProgress}%, transparent ${powProgress}%)` }}
+                >
+                  {t('board.powRunning', { percent: powProgress })}
+                </button>
+              ) : (
+                <button
+                  className="btn btn-sm btn-primary"
+                  disabled={budget.over || !titleInput.trim()}
+                  onClick={requestSubmit}
+                >
+                  {t('board.create')}
+                </button>
+              )}
             </div>
-            {submitError && (
-              <div role="alert" className="alert alert-danger" style={{ marginTop: 10 }}>{submitError}</div>
-            )}
-            {confirming && (
-              <WeakRouteConfirm
-                onCancel={() => setConfirming(false)}
-                onConfirm={() => { setConfirming(false); void trySubmit(); }}
-              />
-            )}
-            {isSubmitting && (
-              <div style={{ marginTop: 12 }}>
-                <div className="progress-status">
-                  <span className="small text-ok">PoW計算中...</span>
-                  <span className="small muted">{powProgress}%</span>
-                </div>
-                <div className="progress">
-                  <span style={{ width: `${powProgress}%` }} />
-                </div>
-              </div>
-            )}
           </div>
+          <div className="compose-inline-hint">{t('board.composeHint')}</div>
+          {submitError && (
+            <div role="alert" className="alert alert-danger" style={{ marginTop: 10 }}>{submitError}</div>
+          )}
+          {confirming && (
+            <WeakRouteConfirm
+              onCancel={() => setConfirming(false)}
+              onConfirm={() => { setConfirming(false); void trySubmit(); }}
+            />
+          )}
         </div>
       )}
 
-      <div>
-        {status && <div className="muted" style={{ padding: '20px 0', textAlign: 'center' }}>{status}</div>}
+      <div className="board-bar">
+        <div className="segmented" role="tablist" aria-label={t('board.sortLabel')}>
+          <button role="tab" aria-selected={sort === 'heat'} onClick={() => changeSort('heat')}>{t('board.sortHeat')}</button>
+          <button role="tab" aria-selected={sort === 'new'} onClick={() => changeSort('new')}>{t('board.sortNew')}</button>
+        </div>
+        {/* 取得の進み具合などは一覧の上の 1 行に出す (届いたスレはすぐ一覧に並ぶ)。
+            ★ 文が無いときも行は残す: 出たり消えたりで一覧の位置が動かないように (長い文は省略し、全文は title) */}
+        {(() => {
+          const shown = status && !(phase === EMPTY_VERDICT_PHASE && threads.length === 0) ? status : '';
+          return <div className="load-status" role="status" title={shown || undefined}>{shown}</div>;
+        })()}
+      </div>
 
-        {threads.length === 0 && !status && (
+      {threads.length === 0 ? (
+        // 取り終わってから 1 回だけ「無い」と言い、その場で立てられるようにする
+        phase === EMPTY_VERDICT_PHASE ? (
           <div className="empty">
-            スレッドはまだありません。「新スレを立てる」から投稿してください。
+            <div>{status || t('board.empty')}</div>
+            {!showForm && (
+              <button className="btn btn-sm btn-primary" style={{ marginTop: 14 }} onClick={() => setShowForm(true)}>
+                {t('board.newThread')}
+              </button>
+            )}
           </div>
-        )}
-
-        <div className="thread-list">
-          {threads.map((t: ThreadMeta) => {
-            const url = `#board=${boardId}&thread=${t.thread_id}`;
-            const heat = Math.floor(t.max_pow || 0);
-            const score = ThreadRanker.calculateScore(t.max_pow || 0, t.created_at);
-
+        ) : null
+      ) : (
+        <div className="thread-table">
+          <div className="thread-head" aria-hidden="true">
+            <span className="thread-col-title">{t('board.colThread')}</span>
+            <span className="thread-col-time">{t('board.colUpdated')}</span>
+            <span className="thread-col-heat">{t('board.colHeat')}</span>
+          </div>
+          {threads.map((th: ThreadMeta) => {
+            const url = `#board=${boardId}&thread=${th.thread_id}`;
+            const score = ThreadRanker.calculateScore(th.max_pow || 0, th.created_at);
+            const unread = read !== null && !read.has(th.thread_id);
+            const last = lastActivity(th);
             return (
-              <a
-                key={t.thread_id}
-                href={url}
-                className="thread-row"
-              >
-                <div className="grow">
-                  <div className="thread-title">{replaceFileTokens(t.content)}</div>
+              <a key={th.thread_id} href={url} className={`thread-row${unread ? ' is-unread' : ''}`}>
+                <div className="thread-col-title">
+                  <div className="thread-title">{replaceFileTokens(th.content)}</div>
                   <div className="thread-meta">
-                    <span>{new Date(t.created_at).toLocaleString()}</span>
-                    <span>ID: <code className="mono">{t.thread_id.substring(0, 8)}</code></span>
-                    <span>Heat: {heat}</span>
+                    <span>{formatDateTime(th.created_at)}</span>
+                    <span>{t('board.idLabel')}<code className="mono">{th.thread_id.substring(0, 8)}</code></span>
                   </div>
                 </div>
-                <div className="thread-score" title="スコア (PoW計算量と新しさ)">
+                <div className="thread-col-time" title={formatDateTime(last)}>{relativeTime(last, now)}</div>
+                <div className="thread-col-heat" title={t('board.scoreTitle')}>
                   {score > 0.1 ? score.toFixed(1) : '0.1'}
                 </div>
               </a>
             );
           })}
         </div>
-      </div>
+      )}
     </div>
   );
 }

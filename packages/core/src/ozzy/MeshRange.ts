@@ -143,9 +143,27 @@ export const OZZY_FETCH_ALLOWED_HOSTS: readonly string[] = [
   'pomf2.lain.la',
   'qu.ax',
   'pixeldrain.com',
+  'r2.anonhost.cc',
 ];
-/** サブドメインまで許すもの (IA のダウンロードは ia*.us.archive.org へ、Gofile は store*.gofile.io へ振り分けられる) */
-export const OZZY_FETCH_ALLOWED_SUFFIXES: readonly string[] = ['.archive.org', '.gofile.io'];
+/**
+ * サブドメインまで許すもの (IA のダウンロードは ia*.us.archive.org へ、Gofile は store*.gofile.io へ、uguu は d. / h. / n. など、
+ * tmpfile.link の生のファイルは zip*.tempfilestorage.link へ振り分けられる)
+ * ★ uguu は 2026-10 の実地テストで h.uguu.se・n.uguu.se を返した。d.uguu.se だけでは M1 が受け取り票を捨てていた。
+ */
+export const OZZY_FETCH_ALLOWED_SUFFIXES: readonly string[] = ['.archive.org', '.gofile.io', '.uguu.se', '.tempfilestorage.link'];
+
+/**
+ * ロッカーへのアップロード・削除の API のホスト (読み出しの許可リストとは別)。デスクトップの直接の通信路 (Electron の main) が、
+ * 頼まれた作業で行ってよい先を決めるのに使う (isAllowedOzzyLockerRequestUrl)。
+ */
+export const OZZY_LOCKER_API_HOSTS: readonly string[] = [
+  'catbox.moe',
+  'litterbox.catbox.moe',
+  'x0.at',
+  'uguu.se',
+  'anonhost.cc',
+  'tmpfile.link',
+];
 
 export function isAllowedOzzyFetchUrl(rawUrl: string, extraHosts: readonly string[] = []): boolean {
   if (!isSafeExternalHttpsUrl(rawUrl)) return false;
@@ -160,6 +178,21 @@ export function isAllowedOzzyFetchUrl(rawUrl: string, extraHosts: readonly strin
   if (OZZY_FETCH_ALLOWED_HOSTS.includes(host)) return true;
   if (OZZY_FETCH_ALLOWED_SUFFIXES.some(s => host.endsWith(s))) return true;
   return extraHosts.some(h => h.toLowerCase() === host);
+}
+
+/**
+ * ロッカーへの HTTP 要求 (読み出し・アップロード・削除) として行ってよい URL か。デスクトップの直接の通信路が、
+ * 他人に頼まれた作業で攻撃者のサーバーや LAN へ行かされないように使う (読み出しの許可リスト + API のホスト)。
+ */
+export function isAllowedOzzyLockerRequestUrl(rawUrl: string): boolean {
+  if (isAllowedOzzyFetchUrl(rawUrl)) return true;
+  if (!isSafeExternalHttpsUrl(rawUrl)) return false;
+  try {
+    const u = new URL(rawUrl);
+    return u.port === '' && OZZY_LOCKER_API_HOSTS.includes(u.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
 }
 
 /** 取得役が実際にロッカーから範囲を取る関数。end は含む。取れなければ null。404 は 'not-found' */
@@ -316,7 +349,11 @@ export const OZZY_UP_PIECE_BYTES = MAX_OZZY_FRAME_BYTES - OZZY_UP_FIXED_BYTES - 
 /** 1 つの作業で運べる本体の上限 (Slab 1 本) */
 export const OZZY_JOB_MAX_BYTES = 64 * 1024 * 1024;
 /** M1 が作業を引き受けるロッカー (資格情報なしで置ける公開ロッカーだけ。IA はアカウントの鍵を M1 に渡すことになるので不可) */
-export const OZZY_JOB_LOCKERS: readonly string[] = ['catbox', 'litterbox', '0x0.st', 'pomf-lain', 'pomf-quax', 'pomf-uguu', 'gofile', 'pixeldrain'];
+/**
+ * 回路の M1 に頼んで置くロッカー (資格情報なし)。1 つ = 1 つの運営者 (catbox と litterbox は同じ運営者)。
+ * ★ 2026-10 の実地テストで通ったものだけ (OnionLockers.createJobLockerAdapters を参照)。
+ */
+export const OZZY_JOB_LOCKERS: readonly string[] = ['catbox', 'litterbox', 'x0.at', 'pomf-uguu', 'anonhost', 'tmpfile'];
 
 export type OzzyLockerJob =
   | { readonly op: 'upload'; readonly lockerId: string; readonly filename: string }
@@ -1235,10 +1272,16 @@ export class OzzyMeshFetcher {
       signal?.addEventListener('abort', onAbort, { once: true });
       if (signal?.aborted) return finish({ ok: false, reason: 'aborted' });
 
-      const canLaunch = () => attempts < this.lim.maxAttempts;
+      // ★ 取得役をしていない M1 (Worker を設定していないブラウザ・取得役を切ったデスクトップ) が返す REFUSED は回数に数えず、
+      //   すぐ別の M1 へ回す。そういう M1 ばかりに当たっても、取得役のいる M1 に届くまで諦めない。
+      //   無限には回らない: 当たった M1 は exclude に入り、送り出しの総数は「回数の上限 + 候補の M1 の数」まで。
+      let launches = 0;
+      const maxLaunches = this.lim.maxAttempts + Math.max(0, this.parts.circuit.middleCandidateCount);
+      const canLaunch = () => attempts < this.lim.maxAttempts && launches < maxLaunches;
       const launch = (): void => {
         if (done || !canLaunch()) return;
         attempts++;
+        launches++;
         active++;
         this.stats.attempts++;
         const exclude = new Set([...usedMiddles, ...this.avoided()]);
@@ -1251,6 +1294,10 @@ export class OzzyMeshFetcher {
           }
           if (outcome.kind === 'not-found' && ++notFound >= this.lim.notFoundQuorum) {
             return finish({ ok: false, reason: 'not-found' });
+          }
+          if (outcome.kind === 'unsupported') {
+            attempts--;
+            if (canLaunch() && active < this.lim.maxParallel) return launch();
           }
           if (active < 1 && canLaunch()) return launch();
           if (active === 0) {
@@ -1388,7 +1435,10 @@ export class OzzyMeshFetcher {
     if (!this.ready) return { ok: false, reason: 'no-fetchers' };
     const used = new Set<PeerId>(opts.exclude ?? []);
     const attempts = Math.max(1, opts.attempts ?? 3);
-    for (let i = 0; i < attempts; i++) {
+    // ★ 取得役をしていない M1 の REFUSED は回数に数えない (fetchRange と同じ)。送り出しの総数は「回数 + 候補の M1 の数」まで
+    const maxTries = attempts + Math.max(0, this.parts.circuit.middleCandidateCount);
+    let counted = 0;
+    for (let tries = 0; counted < attempts && tries < maxTries; tries++) {
       if (opts.signal?.aborted || this.destroyed) return { ok: false, reason: 'aborted' };
       const out = await this.jobAttempt(jobBytes, body, new Set([...used, ...this.avoided()]), opts.signal);
       if (out.middle) used.add(out.middle);
@@ -1396,7 +1446,11 @@ export class OzzyMeshFetcher {
         this.stats.jobsOk++;
         return { ok: true, result: out.data, middle: out.middle! };
       }
-      if (out.kind === 'unsupported' && out.middle) this.avoid.set(out.middle, this.now() + MESH_FETCH_LIMITS.AVOID_MS);
+      if (out.kind === 'unsupported') {
+        if (out.middle) this.avoid.set(out.middle, this.now() + MESH_FETCH_LIMITS.AVOID_MS);
+      } else {
+        counted++;
+      }
       if (!this.ready) return { ok: false, reason: 'no-fetchers' };
     }
     return { ok: false, reason: opts.signal?.aborted ? 'aborted' : 'failed' };

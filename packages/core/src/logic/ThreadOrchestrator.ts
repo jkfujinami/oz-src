@@ -3,6 +3,7 @@ import type { GossipRouter } from '../network/gossip/GossipRouter';
 import type { CatchupProgress } from '../network/history/CatchupClient';
 import type { HistoryFetcher } from '../network/history/HistoryClient';
 import { HistorySession } from './HistorySession';
+import { HistoryMarks, HISTORY_MARKS_THREAD } from './HistoryMarks';
 import { birthDayOfThread, threadTag } from '../crypto/PacketTag';
 import type { CryptoEngine } from '../crypto/CryptoEngine';
 import type { Identity } from '../crypto/Identity';
@@ -10,9 +11,9 @@ import type { IPeerManager, IPoWEngine, IKeyManager } from '../types';
 import { ThreadDAGManager, type DAGPost, type ThreadState } from './ThreadDAGManager';
 import { ThreadClosedError } from './ThreadClosedError';
 import { threadBirthFromId } from './ThreadLimits';
-import { ThreadStatus } from './types';
+import { NO_STATUS, type ThreadStatus, type StatusText } from './types';
 import { PacketBuilder } from '../crypto/PacketBuilder';
-import { MINUTE_MS, estimateSolveMs, msToMinutes } from '../crypto/PowPolicy';
+import { estimateSolveMs } from '../crypto/PowPolicy';
 import { CONGESTION_NOTICE, SLOW_POW_NOTICE_MS } from './PowNotice';
 import { encodePacket, decodePacket } from '../crypto/PacketCodec';
 import { assertPostLimits } from '../crypto/PostCodec';
@@ -41,9 +42,16 @@ export class ThreadOrchestrator {
   private expiryTimer: any = null;
   /** DB からの一括読み込み中 (解析は重いので、1 件ごとに notify しない) */
   private bulkLoading = false;
+  /**
+   * 届いた投稿の通知をまとめて出す印 (queueNotify)。過去ログの取得は 1 回の応答で数百件を同じタスクの中で配るので、
+   * 1 件ごとに notify (DAG の解析 + 再描画) すると、1000 レスで解析と再描画が 1000 回になる。
+   */
+  private notifyQueued = false;
+  /** まとめた通知のあとで「表示される投稿か」を確かめる投稿 (touchThread 用) */
+  private pendingTouch: string[] = [];
   private dag: ThreadDAGManager = new ThreadDAGManager(''); // 初期はダミー
   private seenPacketIds: Set<string> = new Set();
-  private currentStatus: ThreadStatus = { phase: 'idle', message: '' };
+  private currentStatus: ThreadStatus = { phase: 'idle', code: 'none', message: '' };
 
   private currentBoardId: string | null = null;
   private currentBoardKey: Uint8Array | null = null;
@@ -63,6 +71,8 @@ export class ThreadOrchestrator {
   private unsubCatchup: (() => void) | null = null;
   /** 保管担当からの過去ログの取得 (開いたとき 1 回と、1 ホップ目の再接続のとき) */
   private historySession: HistorySession;
+  /** このスレの「保持者から取り切った時刻」(次に開いたときの since) */
+  private historyMarks: HistoryMarks;
 
   constructor(
     private pm: IPeerManager,
@@ -83,7 +93,10 @@ export class ThreadOrchestrator {
      */
     history: HistoryFetcher | null = null,
   ) {
-    this.historySession = new HistorySession(history, () => this.refreshEmptyStatus());
+    this.historyMarks = new HistoryMarks(db, HISTORY_MARKS_THREAD);
+    this.historySession = new HistorySession(history, () => this.refreshEmptyStatus(), (job, startedAt) => {
+      if (this.currentBoardId) void this.historyMarks.complete(this.currentBoardId, job.birthDay, job.tag, startedAt);
+    });
   }
 
   /** useSyncExternalStore の subscribe。購読解除関数を返すだけに徹する。 */
@@ -123,14 +136,15 @@ export class ThreadOrchestrator {
     return this.currentStatus;
   }
 
-  private updateStatus(phase: ThreadStatus['phase'], message: string, isSubmitting: boolean = false, powProgress: number = 0) {
+  private updateStatus(phase: ThreadStatus['phase'], text: StatusText, isSubmitting: boolean = false, powProgress: number = 0) {
+    const { code, message, params } = text;
     const cur = this.currentStatus;
     // 同じ内容なら通知しない (空判定の再評価が頻繁に走るため)
-    if (cur.phase === phase && cur.message === message &&
+    if (cur.phase === phase && cur.code === code && cur.message === message &&
         (cur.isSubmitting ?? false) === isSubmitting && (cur.powProgress ?? 0) === powProgress) {
       return;
     }
-    this.currentStatus = { phase, message, isSubmitting, powProgress };
+    this.currentStatus = params ? { phase, code, params, message, isSubmitting, powProgress } : { phase, code, message, isSubmitting, powProgress };
     this.statusListeners.forEach(l => l());
   }
 
@@ -151,18 +165,18 @@ export class ThreadOrchestrator {
 
     // 保管担当から過去ログを取っている間は、その旨を出す (投稿が届いても、取り終わるまで残す)
     if (this.historySession.active && this.pm.degree > 0) {
-      this.updateStatus('syncing', this.historySession.message());
+      this.updateStatus('syncing', this.historySession.status());
       return;
     }
 
     if (this.dag.getCount() > 0) {
-      this.updateStatus('idle', '');
+      this.updateStatus('idle', NO_STATUS);
       return;
     }
 
     if (this.pm.degree === 0) {
       this.firstPeerAt = null;
-      this.updateStatus('idle', 'ネット接続待機中... 他の人がレスをすれば自動で反映されます。');
+      this.updateStatus('idle', { code: 'waiting-network', message: 'ネット接続待機中... 他の人がレスをすれば自動で反映されます。' });
       return;
     }
 
@@ -170,12 +184,12 @@ export class ThreadOrchestrator {
     const remaining = ThreadOrchestrator.EMPTY_VERDICT_GRACE_MS - (Date.now() - this.firstPeerAt);
 
     if (this.catchup?.active) {
-      this.updateStatus('syncing', '過去ログを取得中...');
+      this.updateStatus('syncing', { code: 'history-fetching', message: '過去ログを取得中...' });
       return; // 終わったら onChange で再評価される
     }
 
     if (remaining > 0) {
-      this.updateStatus('syncing', 'ピアと同期中...');
+      this.updateStatus('syncing', { code: 'syncing-peers', message: 'ピアと同期中...' });
       this.emptyVerdictTimer = setTimeout(() => {
         this.emptyVerdictTimer = null;
         this.refreshEmptyStatus();
@@ -183,7 +197,7 @@ export class ThreadOrchestrator {
       return;
     }
 
-    this.updateStatus('idle', 'レスが1件もありませんでした。あなたが最初の投稿者になりませんか？');
+    this.updateStatus('idle', { code: 'thread-empty', message: 'レスが1件もありませんでした。あなたが最初の投稿者になりませんか？' });
   }
 
   /** スナップショットを作り直してから「変わった」と伝える */
@@ -193,6 +207,22 @@ export class ThreadOrchestrator {
     this.scheduleExpiry();
     log.debug(() => `notify: ${this.snapshot.length} posts -> ${this.listeners.size} listener(s)`);
     this.listeners.forEach(l => l());
+  }
+
+  /**
+   * 届いた投稿の通知を、同じタスクの中で届いた分まとめて 1 回にする (マイクロタスクで出すので、届けた側が await を返す前に済む)。
+   * 自分の投稿・スレの切り替えは notify を直接呼ぶ (すぐに出す)。
+   */
+  private queueNotify(packetId: string) {
+    this.pendingTouch.push(packetId);
+    if (this.notifyQueued) return;
+    this.notifyQueued = true;
+    queueMicrotask(() => {
+      this.notifyQueued = false;
+      const ids = this.pendingTouch.splice(0);
+      this.notify();
+      if (this.currentBoardId && this.currentThreadId) this.touchIfVisible(this.currentBoardId, this.currentThreadId, ids);
+    });
   }
 
   /**
@@ -218,10 +248,11 @@ export class ThreadOrchestrator {
    * 表示される投稿が増えたことを DB の「最後の書き込み」に反映する。
    * ★ 隠れる投稿 (上限超過・猶予後) では呼ばない。隠れる投稿でスレの寿命を延ばせてはいけない。
    */
-  private touchIfVisible(boardId: string, threadId: string, packetId: string) {
+  private touchIfVisible(boardId: string, threadId: string, packetIds: readonly string[]) {
     const last = this.stateSnapshot.lastPostAt;
-    if (last === null) return;
-    if (!this.snapshot.some(p => p.packet_id === packetId)) return;
+    if (last === null || packetIds.length === 0) return;
+    const ids = new Set(packetIds);
+    if (!this.snapshot.some(p => ids.has(p.packet_id))) return;
     try {
       void Promise.resolve(this.db.touchThread(boardId, threadId, last)).catch(() => {});
     } catch { /* 寿命の記録に失敗しても、表示と保存は止めない */ }
@@ -234,6 +265,11 @@ export class ThreadOrchestrator {
     boardId: string, threadId: string, threadKey: Uint8Array, packet: any, isFromDB: boolean,
   ) {
     log.trace(() => `packet enter ${short(packet?.packet_id)} fromDB=${isFromDB}`);
+    // ★ 開いているスレと違う (板・スレ・鍵) 呼び出しは、「見た」の印を付ける前に捨てる (BoardOrchestrator と同じ理由)
+    if (this.isStale(boardId, threadId, threadKey)) {
+      log.trace(() => `packet DROP (stale activation) ${short(packet?.packet_id)}`);
+      return;
+    }
     if (this.seenPacketIds.has(packet.packet_id)) {
       log.trace(() => `packet DROP (already seen) ${short(packet.packet_id)}`);
       return;
@@ -246,6 +282,7 @@ export class ThreadOrchestrator {
       const post = await PacketBuilder.verifyAndDecrypt(
         packet, threadKey, { kind: 'reply', boardId, threadId }, this.cryptoEng,
       );
+      if (this.isStale(boardId, threadId, threadKey)) return; // 復号を待つ間にスレが切り替わった
       if (!post) {
         log.debug(() => `packet DROP (tag/age/SIV/signature) ${short(packet.packet_id)}`);
         return;
@@ -268,11 +305,9 @@ export class ThreadOrchestrator {
         const isNew = this.dag.addPost(dagPost);
         log.debug(() => `dag.addPost ${short(packet.packet_id)} isNew=${isNew}`);
         if (isNew) {
-          // ★ 起動時の一括読み込みでは、1 件ごとに解析し直さず、最後に 1 回だけ通知する
-          if (!this.bulkLoading) {
-            this.notify();
-            this.touchIfVisible(boardId, threadId, dagPost.packet_id);
-          }
+          // ★ 起動時の一括読み込みでは、1 件ごとに解析し直さず、最後に 1 回だけ通知する。
+          //   それ以外 (live・追いつき・過去ログ) も、同じタスクの中で届いた分はまとめて 1 回 (queueNotify)
+          if (!this.bulkLoading) this.queueNotify(dagPost.packet_id);
           // 1 件でも届いたら「無い」の表示を消す
           this.refreshEmptyStatus();
 
@@ -308,12 +343,18 @@ export class ThreadOrchestrator {
     }
   }
 
+  /** スレを開いていて、それが (boardId, threadId, threadKey) の組と違うか。開いていなければ false (開く前の呼び出しは受ける) */
+  private isStale(boardId: string, threadId: string, threadKey: Uint8Array): boolean {
+    if (this.currentThreadId === null) return false;
+    return this.currentThreadId !== threadId || this.currentBoardId !== boardId || !sameBytes(this.currentThreadKey, threadKey);
+  }
+
   /**
    * スレッドの同期と監視を活性化する
    */
   public async activate(boardId: string, threadId: string, boardKey: Uint8Array) {
-    // 1. スレッドが切り替わった場合はリセット
-    if (this.currentThreadId !== threadId) {
+    // 1. スレッドが切り替わった場合はリセット (同じスレ ID でも、板か鍵が違えば別のスレとして扱う)
+    if (this.currentThreadId !== threadId || this.currentBoardId !== boardId || !sameBytes(this.currentBoardKey, boardKey)) {
       this.clear();
       this.currentBoardId = boardId;
       this.currentThreadId = threadId;
@@ -325,7 +366,7 @@ export class ThreadOrchestrator {
 
     if (!this.currentThreadKey) return;
 
-    this.updateStatus('loading', '過去ログを読み込み中...');
+    this.updateStatus('loading', { code: 'history-loading', message: '過去ログを読み込み中...' });
 
     // 2. リスナーの登録（一度だけ）
     if (!this.isListening) {
@@ -365,7 +406,8 @@ export class ThreadOrchestrator {
     }
 
     // 3c. 保管担当から過去ログ (72 時間より古い分)。裏で取る: 画面は待たない
-    this.startHistoryFetch(threadId);
+    await this.historyMarks.load(boardId);
+    if (this.currentThreadId === threadId) this.startHistoryFetch(threadId);
 
     // 4. ネットワーク同期
     await this.triggerInitialSync(boardId, threadId, boardKey);
@@ -385,18 +427,10 @@ export class ThreadOrchestrator {
     if (!key || birthDay === null) return;
     this.historySession.start(() => {
       if (this.currentThreadId !== threadId) return [];
-      let since = 0;
-      const posts = this.snapshot;
-      if (posts.length > 0) {
-        let newest = 0;
-        for (const p of posts) if (p.created_at > newest) newest = p.created_at;
-        try {
-          since = Math.max(0, msToMinutes(newest - 5 * MINUTE_MS));
-        } catch {
-          since = 0;
-        }
-      }
-      return [{ birthDay, tag: threadTag(key, birthDay), since }];
+      // ★ since は「このスレを保持者から取り切った時刻 − 5 分」(HistoryMarks)。記録が無ければ 0 (全部)。
+      //   手元の最新のレスは基準にしない: 最新のレスは追いつきで先に届くことがあり、それより前のレスを取りに行かなくなる
+      const tag = threadTag(key, birthDay);
+      return [{ birthDay, tag, since: this.historyMarks.since(birthDay, tag) }];
     });
   }
 
@@ -405,7 +439,7 @@ export class ThreadOrchestrator {
    */
   private async triggerInitialSync(boardId: string, threadId: string, boardKey: Uint8Array) {
     if (this.dag.getCount() === 0) {
-      this.updateStatus('loading', '隣人を探しています...');
+      this.updateStatus('loading', { code: 'finding-neighbors', message: '隣人を探しています...' });
     }
 
     // 隣人がいない場合は少し待つ (useThread L142-156 を再現)
@@ -454,7 +488,7 @@ export class ThreadOrchestrator {
       return;
     }
 
-    this.updateStatus('syncing', 'ピアと同期中...');
+    this.updateStatus('syncing', { code: 'syncing-peers', message: 'ピアと同期中...' });
     try {
       // ★ 網への問い合わせはしない。スレごとの値で網に GET すると、スレッド鍵を持つ者なら
       //   誰でも計算できて「この IP はこのスレを読んでいる」が漏れる。履歴は手元の DB と、
@@ -464,7 +498,7 @@ export class ThreadOrchestrator {
       this.refreshEmptyStatus();
     } catch (e) {
       log.warn('[ThreadOrchestrator] sync error:', e);
-      this.updateStatus('error', '同期中にエラーが発生しました');
+      this.updateStatus('error', { code: 'sync-error', message: '同期中にエラーが発生しました' });
     }
   }
 
@@ -512,7 +546,7 @@ export class ThreadOrchestrator {
     const preview = this.dag.previewNewPost(new TextEncoder().encode(text).length);
     if (!preview.allowed) throw new ThreadClosedError(preview.reason!);
 
-    this.updateStatus('submitting', 'PoW計算中...', true, 20);
+    this.updateStatus('submitting', { code: 'pow-running', message: 'PoW計算中...' }, true, 20);
 
     try {
 
@@ -529,7 +563,7 @@ export class ThreadOrchestrator {
         onEffort: ({ effort }) => {
           // ★ 推奨 effort で重くなったときだけ、理由を一言添える (最低値は一瞬なので何も出さない)
           if (estimateSolveMs(effort) > SLOW_POW_NOTICE_MS) {
-            this.updateStatus('submitting', CONGESTION_NOTICE, true, 20);
+            this.updateStatus('submitting', { code: 'congestion', message: CONGESTION_NOTICE }, true, 20);
           }
         },
       });
@@ -557,7 +591,7 @@ export class ThreadOrchestrator {
       if (this.dag.addPost(dagPost)) {
         this.seenPacketIds.add(packet.packet_id);
         this.notify();
-        this.touchIfVisible(this.currentBoardId!, this.currentThreadId!, packet.packet_id);
+        this.touchIfVisible(this.currentBoardId!, this.currentThreadId!, [packet.packet_id]);
         await this.db.save({
           boardId: this.currentBoardId!,
           threadId: this.currentThreadId!,
@@ -571,17 +605,17 @@ export class ThreadOrchestrator {
         }).catch(() => {});
       }
 
-      this.updateStatus('submitting', '送信完了 (配信待機中...)', true, 100);
+      this.updateStatus('submitting', { code: 'sent-waiting', message: '送信完了 (配信待機中...)' }, true, 100);
 
       // 物理送信 (バックグラウンド)。本体だけがオニオン回路に載る (保管・索引の依頼は無い)。
       this.sendAnonymously(packet);
 
-      this.updateStatus('idle', '計算完了！送信中...', false, 0);
-      setTimeout(() => this.updateStatus('idle', ''), 3000);
+      this.updateStatus('idle', { code: 'computed-sending', message: '計算完了！送信中...' }, false, 0);
+      setTimeout(() => this.updateStatus('idle', NO_STATUS), 3000);
 
     } catch (err: any) {
       log.error('Failed to prepare packet:', err);
-      this.updateStatus('error', '🔴 失敗: ' + err.toString());
+      this.updateStatus('error', { code: 'send-failed', params: { error: err.toString() }, message: '🔴 失敗: ' + err.toString() });
     }
   }
 
@@ -593,7 +627,7 @@ export class ThreadOrchestrator {
     void (async () => {
       const delivered = await this.router.broadcast(packet);
       if (!delivered) {
-        this.updateStatus('error', '匿名経路で送信できませんでした (平文での送信は行っていません)。隣人が増えてから再度お試しください。');
+        this.updateStatus('error', { code: 'no-anonymous-route', message: '匿名経路で送信できませんでした (平文での送信は行っていません)。隣人が増えてから再度お試しください。' });
       }
     })().catch((err: any) => {
       log.error('[ThreadOrchestrator] anonymous send failed:', err);
@@ -656,13 +690,15 @@ export class ThreadOrchestrator {
     }
 
     this.historySession.reset();
+    this.historyMarks.clear();
     this.dag = new ThreadDAGManager('');
     this.seenPacketIds.clear();
+    this.pendingTouch = [];
     this.currentBoardId = null;
     this.currentBoardKey = null;
     this.currentThreadId = null;
     this.currentThreadKey = null;
-    this.updateStatus('idle', '');
+    this.updateStatus('idle', NO_STATUS);
 
     this.notify();
   }
@@ -670,6 +706,10 @@ export class ThreadOrchestrator {
 }
 
 /** ログ用の短縮表示。undefined でも落ちないようにしておく */
+function sameBytes(a: Uint8Array | null, b: Uint8Array): boolean {
+  return a !== null && a.length === b.length && a.every((x, i) => x === b[i]);
+}
+
 function short(id: string | undefined | null): string {
   return id ? id.substring(0, 8) : '?';
 }

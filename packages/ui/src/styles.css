@@ -1477,6 +1477,29 @@ main {
   font-variant-numeric: tabular-nums;
 }
 
+/* レス番 (押すと書き込み欄にアンカーを入れる) */
+.res-no-btn {
+  padding: 0;
+  font: inherit;
+  font-weight: 750;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.res-no-btn:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.res-no-btn:focus-visible {
+  outline: none;
+  box-shadow: var(--ring);
+}
+
+.res-no-btn:disabled {
+  cursor: default;
+}
+
 .author-name {
   font-weight: 650;
   color: var(--ok);
@@ -1576,6 +1599,493 @@ main {
 }
 
 /* ───────────────────────── responsive ───────────────────────── */
+
+/* ───────────────────────── 板の一覧 ───────────────────────── */
+
+.compose-inline {
+  margin-bottom: 16px;
+  padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+
+.compose-inline textarea {
+  min-height: 56px;
+}
+
+.compose-inline-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.compose-inline-hint {
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+/* 作成ボタンの中の PoW の進み (背景を左から塗る。動きは付けない) */
+.btn.btn-progress,
+.btn.btn-progress:disabled {
+  opacity: 1;
+  color: var(--text);
+  background-color: var(--surface);
+  border-color: var(--line-strong);
+  cursor: progress;
+}
+
+.board-bar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 10px;
+}
+
+/* 取得の進み具合の 1 行。文が無くても高さを保ち、長い文は折り返さずに省略する (位置が動かないように) */
+.load-status {
+  min-width: 0;
+  height: 20px;
+  overflow: hidden;
+  font-size: 12.5px;
+  line-height: 20px;
+  color: var(--text-3);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.board-bar .load-status {
+  flex: 1;
+}
+
+.thread-view .load-status {
+  margin-top: 6px;
+}
+
+.thread-table {
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+
+.thread-head,
+.thread-table .thread-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 112px 64px;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 16px;
+}
+
+.thread-head {
+  padding-top: 8px;
+  padding-bottom: 8px;
+  font-size: 11.5px;
+  color: var(--text-3);
+  border-bottom: 1px solid var(--line);
+}
+
+.thread-table .thread-row {
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.thread-table .thread-row:last-child {
+  border-bottom: 0;
+}
+
+.thread-table .thread-row:hover {
+  background: var(--surface-2);
+}
+
+.thread-table .thread-title {
+  margin-bottom: 2px;
+  font-weight: 500;
+  color: var(--text-2);
+}
+
+/* 開いたことのないスレ */
+.thread-table .thread-row.is-unread .thread-title {
+  font-weight: 700;
+  color: var(--text);
+}
+
+.thread-col-time {
+  font-size: 12.5px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.thread-col-heat {
+  text-align: right;
+  font-size: 14px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+
+.thread-head .thread-col-time,
+.thread-head .thread-col-heat {
+  font-size: 11.5px;
+  font-weight: 400;
+  color: var(--text-3);
+}
+
+/* ───────────────────────── スレッド ───────────────────────── */
+
+/* レスは枠で囲まず、区切り線で並べる */
+.thread-view #posts-container {
+  gap: 0;
+  border-top: 1px solid var(--line-soft);
+}
+
+.thread-view .post {
+  margin-bottom: 0;
+  padding: 12px 4px 14px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.thread-view .post.is-highlight {
+  background: var(--surface);
+  box-shadow: none;
+}
+
+.thread-view .post-header {
+  gap: 2px 10px;
+  margin-bottom: 4px;
+}
+
+.thread-view .res-no {
+  color: var(--text-2);
+}
+
+.thread-view .post-body {
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+/* 書き込み欄の上端: 見ていない間に届いたレスの数 */
+.new-posts {
+  display: block;
+  width: calc(100% + 28px);
+  margin: -14px -14px 12px;
+  padding: 7px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+
+.new-posts:hover {
+  background: var(--surface-3);
+}
+
+/* >>n の小窓 */
+.anchor-preview {
+  position: fixed;
+  z-index: 50;
+  max-width: min(560px, calc(100vw - 32px));
+  max-height: 300px;
+  overflow: hidden;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  pointer-events: none;
+}
+
+.anchor-preview .post-header {
+  gap: 2px 10px;
+  margin-bottom: 4px;
+}
+
+.anchor-preview .post-body {
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+/* ───────────────────────── ファイル共有: 送る間の段階 ───────────────────────── */
+
+.upload-progress-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.upload-steps {
+  display: flex;
+  flex-wrap: wrap;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--line);
+}
+
+.upload-steps li {
+  flex: 1 1 auto;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--text-3);
+  border-right: 1px solid var(--line);
+}
+
+.upload-steps li:last-child {
+  border-right: 0;
+}
+
+.upload-steps li.is-done {
+  color: var(--text-2);
+}
+
+.upload-steps li.is-current {
+  color: var(--text);
+  font-weight: 650;
+  background: var(--surface-2);
+}
+
+.locker-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.locker-table th {
+  padding: 4px 8px;
+  font-weight: 400;
+  text-align: left;
+  color: var(--text-3);
+  border-bottom: 1px solid var(--line);
+}
+
+.locker-table td {
+  padding: 4px 8px;
+  color: var(--text-2);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.locker-table td.text-warn {
+  color: var(--warn);
+}
+
+/* ───────────────────────── 状態とログ ───────────────────────── */
+
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  border-top: 1px solid var(--line);
+  border-left: 1px solid var(--line);
+  margin-bottom: 20px;
+}
+
+.status-cell {
+  min-width: 0;
+  padding: 10px 14px;
+  background: var(--surface);
+  border-right: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+
+.status-key {
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.status-val {
+  margin-top: 3px;
+  font-size: 13px;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.log-panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+
+.log-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.log-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.log-field-key {
+  font-size: 12px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+.log-toolbar select {
+  width: auto;
+  padding: 5px 30px 5px 8px;
+  font-size: 12.5px;
+}
+
+.log-toolbar input.log-search:not([type="checkbox"]):not([type="radio"]):not([type="file"]) {
+  width: 200px;
+  padding: 5px 8px;
+  font-size: 12.5px;
+}
+
+.log-actions {
+  display: inline-flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.btn[aria-pressed="true"] {
+  background: var(--surface-3);
+  border-color: var(--text-3);
+}
+
+.log-note {
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--warn);
+  border-bottom: 1px solid var(--line);
+}
+
+.log-list {
+  height: max(320px, calc(100vh - 470px));
+  overflow: auto;
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.log-row {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px;
+  white-space: nowrap;
+  color: var(--text-2);
+}
+
+.log-row:hover {
+  background: var(--surface);
+}
+
+.log-row.is-selected {
+  background: var(--surface-2);
+}
+
+.log-time {
+  flex: none;
+  color: var(--text-3);
+}
+
+.log-level {
+  flex: none;
+  width: 44px;
+  color: var(--text-3);
+}
+
+.log-scope {
+  flex: none;
+  width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-3);
+}
+
+.log-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.log-l1 .log-level,
+.log-detail-head .log-l1 {
+  color: var(--danger);
+}
+
+.log-l2 .log-level,
+.log-detail-head .log-l2 {
+  color: var(--warn);
+}
+
+.log-empty {
+  padding: 24px;
+  text-align: center;
+  font-family: var(--font);
+  font-size: 13px;
+  color: var(--text-3);
+}
+
+.log-more {
+  display: block;
+  width: 100%;
+  padding: 6px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 0;
+  border-top: 1px solid var(--line);
+  cursor: pointer;
+}
+
+.log-more:hover {
+  background: var(--surface-3);
+}
+
+.log-foot {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 10px;
+  font-size: 11.5px;
+  color: var(--text-3);
+  border-top: 1px solid var(--line);
+}
+
+.log-detail {
+  padding: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.log-detail-head {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.log-detail-text {
+  max-height: 200px;
+  overflow: auto;
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 
 @media (max-width: 760px) {
   .shell {

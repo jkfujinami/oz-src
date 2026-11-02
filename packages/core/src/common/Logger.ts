@@ -240,11 +240,57 @@ export function setSink(s: Sink): void {
   sink = s;
 }
 
+/** 画面のログ表示 (状態とログ) に流す 1 行。本文は文字列にして、長い ID を縮めてある */
+export interface LogRecord {
+  readonly seq: number;
+  readonly at: number;
+  readonly level: LogLevelValue;
+  readonly scope: string;
+  readonly text: string;
+}
+
+/** 1 行の本文の上限 (文字)。超えた分は切る */
+const RECORD_MAX_CHARS = 2000;
+const taps = new Set<(r: LogRecord) => void>();
+let recordSeq = 0;
+
+/**
+ * 出したログを 1 行ずつ受け取る (画面のログ表示用)。戻り値で解除する。
+ * ★ 受け取るのはレベルの判定を通って実際に出た行だけ。本文は全レベルで長い ID を先頭 8 文字に縮める
+ *   (コンソールは WARN / ERROR だけ縮める。画面はコピーされうるので、DEBUG / TRACE も縮める)。
+ */
+export function onLogRecord(fn: (r: LogRecord) => void): () => void {
+  taps.add(fn);
+  return () => { taps.delete(fn); };
+}
+
+function stringifyArg(a: unknown): string {
+  if (typeof a === 'string') return a;
+  if (a instanceof Error) return `${a.name}: ${a.message}`;
+  if (a instanceof Uint8Array) return `<${a.length} bytes>`;
+  if (a === null || typeof a !== 'object') return String(a);
+  try {
+    return JSON.stringify(a, (_k, v) => (typeof v === 'bigint' ? v.toString() : v instanceof Uint8Array ? `<${v.length} bytes>` : v)) ?? String(a);
+  } catch {
+    return String(a);
+  }
+}
+
+function recordText(args: unknown[]): string {
+  const text = redactIds(args.map(stringifyArg).join(' '));
+  return text.length > RECORD_MAX_CHARS ? `${text.slice(0, RECORD_MAX_CHARS)}…` : text;
+}
+
 export function createLogger(scope: string): Logger {
   const emit = (level: LogLevelValue, method: keyof Sink, args: Arg[]) => {
     if (levelFor(scope) < level) return;
     const out = resolve(args);
     sink[method](`[${scope}]`, ...(level <= LogLevel.WARN ? redactArgs(out) : out));
+    if (taps.size === 0) return;
+    const rec: LogRecord = { seq: ++recordSeq, at: Date.now(), level, scope, text: recordText(out) };
+    for (const tap of taps) {
+      try { tap(rec); } catch { /* 受け手の失敗でログを止めない */ }
+    }
   };
 
   return {

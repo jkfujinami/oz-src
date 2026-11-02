@@ -22,11 +22,11 @@ import {
   type OzzyMeshFetcher,
 } from './MeshRange';
 import {
+  AnonhostLockerAdapter,
   CatboxLockerAdapter,
-  GofileLockerAdapter,
   LitterboxLockerAdapter,
-  PixeldrainLockerAdapter,
   PomfLockerAdapter,
+  TmpfileLockerAdapter,
   ZeroXZeroLockerAdapter,
   type HttpTransportFn,
   type OverseasLockerAdapter,
@@ -76,16 +76,17 @@ function encodeReceipt(r: UploadedLockerSlabReceipt): Uint8Array {
 
 /** M1 が他人の作業に使うロッカーのアダプタ (資格情報なし)。transport は他人の中継 Worker 経由のもの */
 export function createJobLockerAdapters(transport: HttpTransportFn): Map<string, OverseasLockerAdapter> {
+  // ★ 1 つのアダプタ = 1 つの運営者。別の運営者へ黙って切り替えるもの (0x0.st → x0.at、pomf 各社 → uguu) は使わない。
+  //   2026-10 の実地テスト (上げた直後と 5 秒後に Range 206 で中身が一致) で通ったものだけ。
+  //   外したもの: 0x0.st (アップロード停止)・pomf2.lain.la (つながらない)・qu.ax (種類の制限で拒否)・
+  //   gofile (返る URL が HTML のページで、範囲を取れない)・pixeldrain (匿名アップロード不可 401)
   const list: OverseasLockerAdapter[] = [
     new CatboxLockerAdapter(transport),
     new LitterboxLockerAdapter(transport, { expiryTime: '72h' }),
-    new ZeroXZeroLockerAdapter(transport),
-    new PomfLockerAdapter(transport, { variant: 'pomf-lain' }),
-    new PomfLockerAdapter(transport, { variant: 'pomf-quax' }),
-    new PomfLockerAdapter(transport, { variant: 'pomf-uguu' }),
-    // 他人の要求でゲスト ID を作るので、5 秒に 1 つまで
-    new GofileLockerAdapter(transport, { minMintIntervalMs: 5_000 }),
-    new PixeldrainLockerAdapter(transport),
+    new ZeroXZeroLockerAdapter(transport, { lockerId: 'x0.at' }),
+    new PomfLockerAdapter(transport, { variant: 'pomf-uguu', fallbackUploadUrls: [] }),
+    new AnonhostLockerAdapter(transport),
+    new TmpfileLockerAdapter(transport),
   ];
   return new Map(list.map(a => [a.lockerId, a]));
 }

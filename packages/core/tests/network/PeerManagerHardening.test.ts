@@ -169,4 +169,64 @@ describe('PeerManager 要塞化 (Hardening Integration Tests)', () => {
       vi.useRealTimers();
     }
   });
+
+  describe('握手の途中に届いたフレーム (相手が先にこちらを検証済みにした)', () => {
+    const PEER = 'abc00000000000000000000000000077';
+    const frame = () => WireCodec.encode(WireType.LEASESET_SYNC_REQ, {});
+    const conn = (over: Record<string, any> = {}): any => ({ peerId: PEER, isVerified: false, isConnected: true, close: vi.fn(), send: vi.fn(), ...over });
+    const verify = (c: any) => {
+      c.isVerified = true;
+      (peerManagerA as any).flushPreVerify(PEER);
+    };
+
+    it('★検証が済むまで処理せず、済んだら届いた順に処理する (要求や flood を捨てない)', () => {
+      const got: string[] = [];
+      dispatcherA.register(WireType.LEASESET_SYNC_REQ, () => got.push('sync'));
+      dispatcherA.register(WireType.LEASESET_SYNC, () => got.push('data'));
+      const c = conn();
+      (peerManagerA as any)._peers.set(PEER, c);
+      (peerManagerA as any).handleData(PEER, frame());
+      (peerManagerA as any).handleData(PEER, WireCodec.encode(WireType.LEASESET_SYNC, { leaseSets: [] }));
+      expect(got).toEqual([]);
+      verify(c);
+      expect(got).toEqual(['sync', 'data']);
+      // 2 度は処理しない
+      (peerManagerA as any).flushPreVerify(PEER);
+      expect(got).toEqual(['sync', 'data']);
+    });
+
+    it('★握手が失敗した・切れたら捨てる。同じ ID を名乗った別の接続の分は、後で本物が検証されても処理しない', () => {
+      const got: number[] = [];
+      dispatcherA.register(WireType.LEASESET_SYNC_REQ, () => got.push(1));
+      const impostor = conn();
+      (peerManagerA as any)._peers.set(PEER, impostor);
+      (peerManagerA as any).handleData(PEER, frame());
+      peerManagerA.disconnect(PEER);
+      const real = conn();
+      (peerManagerA as any)._peers.set(PEER, real);
+      verify(real);
+      expect(got).toEqual([]);
+
+      // 切断を経ずに接続が差し替わった場合も、検証したのと別の接続の分は処理しない
+      const a = conn();
+      (peerManagerA as any)._peers.set(PEER, a);
+      (peerManagerA as any).handleData(PEER, frame());
+      const b = conn();
+      (peerManagerA as any)._peers.set(PEER, b);
+      verify(b);
+      expect(got).toEqual([]);
+    });
+
+    it('取っておくのは上限まで (件数)。超えた分は捨てて数える', () => {
+      let n = 0;
+      dispatcherA.register(WireType.LEASESET_SYNC_REQ, () => n++);
+      const c = conn();
+      (peerManagerA as any)._peers.set(PEER, c);
+      for (let i = 0; i < 40; i++) (peerManagerA as any).handleData(PEER, frame());
+      verify(c);
+      expect(n).toBeLessThan(40);
+      expect(n).toBeGreaterThan(0);
+      expect(peerManagerA.preVerifyDropped).toBe(40 - n);
+    });
+  });
 });

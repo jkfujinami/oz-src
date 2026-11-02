@@ -7,6 +7,7 @@ import { R_QUERY, birthDayOf, type Duty } from '../storage/Duty';
 import type { LeaseSetStore } from '../storage/LeaseSetStore';
 import { TUNNEL_KIND, decryptChunk, newRespKey, sealRequest } from '../tunnel/TunnelCrypto';
 import type { TunnelClient } from '../tunnel/TunnelClient';
+import { TUNNEL_ERROR_CODE } from '../wire/WireCodec';
 import {
   FETCH_MAX_ACCEPT_BYTES, FETCH_STATUS, decodeFetchResponse, encodeFetchRequest, type FetchResponse,
 } from './FetchBucket';
@@ -14,10 +15,20 @@ import {
 const log = createLogger('net.history.client');
 
 export const HISTORY_LIMITS = {
-  /** 最初の 2 台へ頼んでから、遅ければ次の 1 台へ回すまで (hedged request) */
-  HEDGE_MS: 4_000,
+  /**
+   * 最初の 2 台へ頼んでから、遅ければ次の 1 台へ回すまで (hedged request)。
+   * ★ 実網の実測で、保持者の応答はふつう 0.05〜0.1 秒 (遅いものでも 0.2 秒前後)。たまに数秒かかる相手が枠を塞ぐので、早めに見切る
+   */
+  HEDGE_MS: 1_500,
   /** 1 回の要求で、応答の片が 1 つも届かないまま待つ上限 */
   INACTIVITY_MS: 15_000,
+  /**
+   * 最後の片 (復号した中身の final) が届いたのに、途中の片が欠けているときに待つ上限。
+   * ★ 各段は届いた順にすぐ転送し、送り手 (ChunkedSender) は 1 本の列で順序を保つので、穴はほぼ確実に途中で捨てられた片
+   *   (帯域・レートの枠・改ざん)。INACTIVITY_MS (15 秒) を待たずに次の保持者へ回る。
+   *   旧版の送り手は混雑時に 4KiB 以下のフレーム (最後の短い片など) が先に出ることがあるので、その遅れが埋まる長さを取る。
+   */
+  GAP_GRACE_MS: 3_000,
   /** 1 回の取得で頼む保持者の数の上限 */
   MAX_ATTEMPTS: 8,
   /** 最初に同時に頼む数と、同時に頼む数の上限 (hedge を含む) */
@@ -34,12 +45,40 @@ export const HISTORY_LIMITS = {
   /** 保持者の leaseSet が手元に届くのを待つ上限 (新しい端末は 1 ホップ目からの一括送信 (SYNC) を待つ) */
   HOLDERS_WAIT_MS: 15_000,
   HOLDERS_POLL_MS: 1_000,
-  /** 同時に走らせる取得の数 (板の週別 + スレ) */
-  MAX_CONCURRENT_FETCHES: 4,
+  /**
+   * 同時に走らせる取得の数 (板の 13 週 + スレ)。
+   * ★ 実網の実測で、板の 13 週のうちスレのある週は 0.1 秒で終わり、残り (スレの無い週) が 4 本ずつの枠待ちで 9 秒かかっていた。
+   *   全部を一度に走らせ、相手の混み具合は受け口ごとの同時数 (PER_GATEWAY_INFLIGHT) と BUSY の頼み直しで抑える
+   */
+  MAX_CONCURRENT_FETCHES: 16,
+  /**
+   * 1 つの受け口 (保持者の leaseSet の gateway) へ同時に出す要求の数。
+   * ★ 受け口は、1 ホップ目から来る要求を相手ごとに絞る (旧版は毎秒 2 件・同時 6 件。1 ホップ目の他の利用者の分も同じ枠)。
+   *   一度に浴びせると BUSY で断られ、その分だけ遅くなる
+   */
+  PER_GATEWAY_INFLIGHT: 3,
+  /** BUSY (受け口・1 ホップ目の枠・手元の同時数) で断られたとき、同じ保持者に頼み直す回数と、最初の待ち (倍々。上限 2 秒) */
+  BUSY_RETRIES: 4,
+  BUSY_BACKOFF_MS: 300,
+  /**
+   * 「全部です」(OK) をこの数の保持者から受け取り、合わせたものを結果にする (候補がそれより少なければ、全員分)。
+   * ★ 保持者は、自分がいなかった間 (参加前・落ちていた間) の投稿を持っていない。1 台の OK で終えると、その欠けがそのまま残り、
+   *   取り切った時刻 (HistoryMarks) の記録で次からも取り直されない (実網で、端末ごとにスレやレスの揃い方が違った)。
+   * ★ 「持っていない」(NOT_HELD) が続いても打ち切らない: 投稿を持っているのが長くいる一部の保持者だけ、ということがある
+   *   (参加して日の浅い保持者は NOT_HELD と答える)。候補は MAX_ATTEMPTS まで試す
+   */
+  REQUIRED_OK: 2,
   /** 速さの記録の上限 (メモリだけ) */
   SPEED_MEMORY: 2048,
   /** 失敗した保持者に付ける、速さの代わりの値 (ms)。次回から後回しになる */
   FAIL_PENALTY_MS: 60_000,
+  /**
+   * 届かなかった保持者 (無通信の時間切れ・受け口に届かない・未登録) を、候補から外しておく時間 (ms。メモリだけ)。
+   * ★ leaseSet は落ちた保持者のものも最大 6 時間残る (LEASESET_LIFETIME_MS)。空のバケット (その週にスレ立てが無い) は
+   *   「無い」と言い切れないので候補を全員試すまで終わらず、外さないと空の週ごとに同じ保持者の時間切れ (15 秒) を待つ。
+   *   候補が全員外れているときは外さずに試す。
+   */
+  UNREACHABLE_SKIP_MS: 5 * 60_000,
 } as const;
 
 /**
@@ -86,7 +125,7 @@ export interface HistoryClientParts {
   /** 乱数 [0,1)。速さの記録がない保持者の順番に使う */
   random?: () => number;
   /** ★ テスト専用 */
-  limits?: Partial<{ hedgeMs: number; inactivityMs: number; readyWaitMs: number; holdersWaitMs: number; holdersPollMs: number; maxAttempts: number }>;
+  limits?: Partial<{ hedgeMs: number; inactivityMs: number; gapGraceMs: number; readyWaitMs: number; holdersWaitMs: number; holdersPollMs: number; maxAttempts: number }>;
 }
 
 interface Candidate {
@@ -105,10 +144,15 @@ interface Ctx {
   received: number;
   rejected: number;
   done: boolean;
+  /** 「全部です」(OK) と答えた保持者の数 (REQUIRED_OK) */
+  okCount: number;
   onProgress?: (n: number) => void;
   /** 走っている要求の取り消し */
   cancels: Set<() => void>;
 }
+
+/** 1 台の保持者への取得の結果 */
+type AttemptResult = 'ok' | 'not-held' | 'fail';
 
 /**
  * HistoryClient — 保管担当 (保持者) から過去ログのバケットを取る (history v2 §4.5)。
@@ -131,11 +175,16 @@ interface Ctx {
 export class HistoryClient {
   private readonly now: () => number;
   private readonly random: () => number;
-  private readonly lim: { hedgeMs: number; inactivityMs: number; readyWaitMs: number; holdersWaitMs: number; holdersPollMs: number; maxAttempts: number };
+  private readonly lim: { hedgeMs: number; inactivityMs: number; gapGraceMs: number; readyWaitMs: number; holdersWaitMs: number; holdersPollMs: number; maxAttempts: number };
   private speeds = new Map<string, number>();
+  /** 届かなかった保持者 (SID → この時刻まで候補から外す)。メモリだけ */
+  private unreachableUntil = new Map<string, number>();
   private readyListeners = new Set<() => void>();
   private waiters: Array<() => void> = [];
   private running = 0;
+  /** 受け口ごとの、いま出している要求の数と、空きを待っている要求 (PER_GATEWAY_INFLIGHT) */
+  private gatewayActive = new Map<string, number>();
+  private gatewayWaiters = new Map<string, Array<() => void>>();
   private destroyed = false;
 
   /** 診断・テスト用 */
@@ -152,6 +201,7 @@ export class HistoryClient {
     this.lim = {
       hedgeMs: l.hedgeMs ?? HISTORY_LIMITS.HEDGE_MS,
       inactivityMs: l.inactivityMs ?? HISTORY_LIMITS.INACTIVITY_MS,
+      gapGraceMs: l.gapGraceMs ?? HISTORY_LIMITS.GAP_GRACE_MS,
       readyWaitMs: l.readyWaitMs ?? HISTORY_LIMITS.READY_WAIT_MS,
       holdersWaitMs: l.holdersWaitMs ?? HISTORY_LIMITS.HOLDERS_WAIT_MS,
       holdersPollMs: l.holdersPollMs ?? HISTORY_LIMITS.HOLDERS_POLL_MS,
@@ -209,18 +259,35 @@ export class HistoryClient {
       if (!ls) continue;
       out.push({ sid: slot.sid, sidBytes: ls.sid, gateway: ls.gateway, tunnelId: ls.tunnelId });
     }
-    return out;
+    // 届かなかった保持者は、しばらく外す (UNREACHABLE_SKIP_MS)。全員外れるなら外さない
+    const now = this.now();
+    const reachable = out.filter(c => !((this.unreachableUntil.get(c.sid) ?? 0) > now));
+    return reachable.length > 0 ? reachable : out;
   }
 
-  /** 速さの記録がある保持者を速い順に、無い保持者を乱数の順にその後ろへ */
+  /**
+   * 速さの記録がある保持者を速い順に、無い保持者を乱数の順にその後ろへ。
+   * ★ 記録が無通信の時間切れより遅い保持者 (失敗の罰が付いたもの) は、記録が無い保持者よりさらに後ろ。
+   */
   private rank(cands: Candidate[]): Candidate[] {
-    const known = cands.filter(c => this.speeds.has(c.sid)).sort((a, b) => this.speeds.get(a.sid)! - this.speeds.get(b.sid)!);
+    const slow = (c: Candidate) => this.speeds.get(c.sid)! > this.lim.inactivityMs;
+    const bySpeed = (a: Candidate, b: Candidate) => this.speeds.get(a.sid)! - this.speeds.get(b.sid)!;
+    const known = cands.filter(c => this.speeds.has(c.sid));
     const unknown = cands.filter(c => !this.speeds.has(c.sid));
     for (let i = unknown.length - 1; i > 0; i--) {
       const j = Math.floor(this.random() * (i + 1));
       [unknown[i], unknown[j]] = [unknown[j], unknown[i]];
     }
-    return [...known, ...unknown];
+    return [...known.filter(c => !slow(c)).sort(bySpeed), ...unknown, ...known.filter(slow).sort(bySpeed)];
+  }
+
+  /** 届かなかった保持者として、しばらく候補から外す */
+  private markUnreachable(sid: string): void {
+    this.unreachableUntil.set(sid, this.now() + HISTORY_LIMITS.UNREACHABLE_SKIP_MS);
+    if (this.unreachableUntil.size > HISTORY_LIMITS.SPEED_MEMORY) {
+      const oldest = this.unreachableUntil.keys().next().value;
+      if (oldest !== undefined) this.unreachableUntil.delete(oldest);
+    }
   }
 
   /** 保持者 1 台の完了までの時間 (ms) を記録する (移動平均。メモリだけ)。失敗は FAIL_PENALTY_MS を渡す */
@@ -291,7 +358,7 @@ export class HistoryClient {
 
     const ordered = this.rank(cands);
     const ctx: Ctx = {
-      birthDay, tag, since: opts.since ?? 0, seen: new Set(), received: 0, rejected: 0, done: false,
+      birthDay, tag, since: opts.since ?? 0, seen: new Set(), received: 0, rejected: 0, done: false, okCount: 0,
       onProgress: opts.onProgress, cancels: new Set(),
     };
 
@@ -320,13 +387,16 @@ export class HistoryClient {
         attempts++;
         active++;
         this.stats.attempts++;
-        void this.attempt(c, ctx).then((ok) => {
+        void this.attempt(c, ctx).then((r) => {
           active--;
           if (ctx.done) return;
-          if (ok) return finish(true, 'ok');
-          // 失敗 (空・未保有・不正・時間切れ): すぐ次の保持者へ
-          if (canLaunch() && active < HISTORY_LIMITS.INITIAL_PARALLEL) launch();
-          else if (active === 0 && !canLaunch()) finish(false, 'exhausted');
+          // OK を REQUIRED_OK 台 (候補がそれより少なければ全員) から受け取ったら完了。届いた投稿は両方の分を合わせてある (ctx.seen)
+          const need = Math.min(HISTORY_LIMITS.REQUIRED_OK, ordered.length);
+          if (r === 'ok' && ++ctx.okCount >= need) return finish(true, 'ok');
+          // まだ足りない: 走っている要求で足りるなら待つ。失敗 (空・未保有・不正・時間切れ) なら、すぐ次の保持者へ
+          const want = r === 'ok' ? need - ctx.okCount : HISTORY_LIMITS.INITIAL_PARALLEL;
+          if (canLaunch() && active < want) launch();
+          else if (active === 0 && !canLaunch()) finish(ctx.okCount > 0, ctx.okCount > 0 ? 'ok' : 'exhausted');
         });
       };
 
@@ -344,54 +414,108 @@ export class HistoryClient {
     });
   }
 
-  /** 1 台の保持者から、続きを含めて最後まで取る。完了したら true */
-  private async attempt(c: Candidate, ctx: Ctx): Promise<boolean> {
+  /** 1 台の保持者から、続きを含めて最後まで取る */
+  private async attempt(c: Candidate, ctx: Ctx): Promise<AttemptResult> {
     const t0 = this.now();
     let since = ctx.since;
+    let busy = 0;
     try {
-      for (let page = 0; page < HISTORY_LIMITS.MAX_PAGES; page++) {
-        const res = await this.requestOnce(c, ctx, since);
-        if (ctx.done) return false;
+      for (let page = 0; page < HISTORY_LIMITS.MAX_PAGES;) {
+        const r = await this.requestOnce(c, ctx, since);
+        if (ctx.done) return 'fail';
+        const res = r.res;
+        if (!res && r.busy && busy < HISTORY_LIMITS.BUSY_RETRIES) {
+          // 混んでいる (受け口・1 ホップ目の枠・手元の同時数): 保持者の失敗ではない。待って同じ保持者に頼み直す
+          busy++;
+          await new Promise<void>((resolve) => setTimeout(resolve, Math.min(2_000, HISTORY_LIMITS.BUSY_BACKOFF_MS * 2 ** (busy - 1))));
+          if (ctx.done) return 'fail';
+          continue;
+        }
         if (!res) {
           this.recordSpeed(c.sid, HISTORY_LIMITS.FAIL_PENALTY_MS);
-          return false;
+          if (r.unreachable) this.markUnreachable(c.sid);
+          return 'fail';
         }
-        if (res.status === FETCH_STATUS.NOT_HELD) return false; // 持っていないだけ。罰は付けない
+        this.unreachableUntil.delete(c.sid);
+        if (res.status === FETCH_STATUS.NOT_HELD) return 'not-held'; // 持っていないだけ。罰は付けない
         const before = ctx.rejected;
         const gotNow = this.ingest(res, ctx);
         if (ctx.rejected > before) {
           // 検証を通らない投稿を返した: 偽物。後回しにして次へ
           this.recordSpeed(c.sid, HISTORY_LIMITS.FAIL_PENALTY_MS);
-          return false;
+          return 'fail';
         }
         if (res.status === FETCH_STATUS.OK) {
           // 全部取るのに空 (保持者が持っていると言ったのに 1 件も無い) は信用しない
-          if (ctx.since === 0 && page === 0 && gotNow === 0 && ctx.received === 0) return false;
+          if (ctx.since === 0 && page === 0 && gotNow === 0 && ctx.received === 0) return 'fail';
           this.recordSpeed(c.sid, this.now() - t0);
-          return true;
+          return 'ok';
         }
         since = res.nextSince;
-        if (since < ctx.since) return false;
+        if (since < ctx.since) return 'fail';
+        page++;
       }
-      return false;
+      return 'fail';
     } catch (e) {
       log.warn('fetch attempt failed', e);
-      return false;
+      return 'fail';
     }
   }
 
-  /** 要求 1 回。完全な応答 (全部の片が揃い、最後の片が平文の final) か、失敗なら null */
-  private requestOnce(c: Candidate, ctx: Ctx, since: number): Promise<FetchResponse | null> {
+  /** 受け口ごとの同時数の枠 (PER_GATEWAY_INFLIGHT) を取る */
+  private async acquireGateway(gateway: string): Promise<void> {
+    const n = this.gatewayActive.get(gateway) ?? 0;
+    if (n < HISTORY_LIMITS.PER_GATEWAY_INFLIGHT) {
+      this.gatewayActive.set(gateway, n + 1);
+      return;
+    }
+    await new Promise<void>((resolve) => {
+      const q = this.gatewayWaiters.get(gateway) ?? [];
+      q.push(resolve);
+      this.gatewayWaiters.set(gateway, q);
+    });
+  }
+
+  private releaseGateway(gateway: string): void {
+    const q = this.gatewayWaiters.get(gateway);
+    const next = q?.shift();
+    if (q && q.length === 0) this.gatewayWaiters.delete(gateway);
+    if (next) {
+      next(); // 枠はそのまま次の要求へ
+      return;
+    }
+    const n = (this.gatewayActive.get(gateway) ?? 1) - 1;
+    if (n <= 0) this.gatewayActive.delete(gateway);
+    else this.gatewayActive.set(gateway, n);
+  }
+
+  /** 要求 1 回 (受け口ごとの枠の中で)。requestThrough の説明を参照 */
+  private async requestOnce(c: Candidate, ctx: Ctx, since: number): Promise<{ res: FetchResponse | null; unreachable: boolean; busy: boolean }> {
+    await this.acquireGateway(c.gateway);
+    try {
+      if (ctx.done || this.destroyed) return { res: null, unreachable: false, busy: false };
+      return await this.requestThrough(c, ctx, since);
+    } finally {
+      this.releaseGateway(c.gateway);
+    }
+  }
+
+  /**
+   * 要求 1 回。完全な応答 (全部の片が揃い、最後の片が平文の final) か、失敗なら null。
+   * unreachable = 保持者に届かなかった (片が 1 つも来ないまま時間切れ・受け口に届かない・未登録)。制限 (BUSY) や改ざんは含めない
+   * busy = 混んでいて断られた (受け口・1 ホップ目の BUSY、手元の同時数の上限)。頼み直してよい
+   */
+  private requestThrough(c: Candidate, ctx: Ctx, since: number): Promise<{ res: FetchResponse | null; unreachable: boolean; busy: boolean }> {
     return new Promise((resolve) => {
       const respKey = newRespKey();
       let payload: Uint8Array;
       try {
         payload = encodeFetchRequest({ birthDay: ctx.birthDay, tag: ctx.tag, since });
       } catch {
-        return resolve(null);
+        return resolve({ res: null, unreachable: false, busy: false });
       }
       const sealed = sealRequest(c.sidBytes, TUNNEL_KIND.FETCH_BUCKET, respKey, payload);
-      if (!sealed) return resolve(null);
+      if (!sealed) return resolve({ res: null, unreachable: false, busy: false });
 
       const parts = new Map<number, Uint8Array>();
       let finalSeq = -1;
@@ -401,25 +525,33 @@ export class HistoryClient {
       let timer: ReturnType<typeof setTimeout> | null = null;
       let handle: { cancel(): void } | null = null;
 
-      const end = (res: FetchResponse | null) => {
+      const end = (res: FetchResponse | null, unreachable = false, busy = false) => {
         if (settled) return;
         settled = true;
         if (timer) clearTimeout(timer);
         handle?.cancel();
         ctx.cancels.delete(cancel);
         respKey.fill(0);
-        resolve(res);
+        resolve({ res, unreachable, busy });
       };
       const cancel = () => end(null);
       ctx.cancels.add(cancel);
       const arm = () => {
         if (timer) clearTimeout(timer);
-        timer = setTimeout(() => end(null), this.lim.inactivityMs);
+        // 最後の片が届いたのに穴がある: 短い猶予 (GAP_GRACE_MS) で諦める
+        timer = setTimeout(
+          () => end(null, parts.size === 0 && bad === 0),
+          finalSeq >= 0 ? this.lim.gapGraceMs : this.lim.inactivityMs,
+        );
       };
 
       handle = this.parts.tunnel.request({ gateway: c.gateway, tunnelId: c.tunnelId, body: sealed }, (ev) => {
         if (settled) return;
-        if (ev.type === 'error') return end(null);
+        if (ev.type === 'error') {
+          const code = ev.code;
+          const busy = ev.local === 'too-many' || (!ev.local && code === TUNNEL_ERROR_CODE.BUSY);
+          return end(null, !ev.local && (code === TUNNEL_ERROR_CODE.NO_ROUTE || code === TUNNEL_ERROR_CODE.NO_TUNNEL || code === TUNNEL_ERROR_CODE.TIMEOUT), busy);
+        }
         // ★ フレームの final (平文) ではなく、復号した中身の final を使う。途中の片を黙って落とされても完結と見なさない
         const dec = decryptChunk(respKey, TUNNEL_KIND.FETCH_BUCKET, ev.seq, ev.body);
         if (!dec) {
@@ -451,8 +583,9 @@ export class HistoryClient {
           end(decodeFetchResponse(out));
         }
       });
-      if (handle) arm();
-      else end(null);
+      // 要求を出せなかった (1 ホップ目が無い・手元の同時数の上限) ときは、理由がすぐ (マイクロタスクで) error として届く。
+      // 届かない実装でも止まらないよう、無通信の時計は常に動かす
+      arm();
     });
   }
 

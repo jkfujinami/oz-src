@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { ChunkedSender } from '../../src/network/stream/ChunkedSender';
+import {
+  ChunkedSender, isBulkFrame, UNCHUNKED_MAX_BYTES, SEND_HIGH_WATER, SEND_LOW_WATER, MAX_QUEUED_BYTES,
+} from '../../src/network/stream/ChunkedSender';
+import { WireType } from '../../src/network/wire/WireTypes';
 import { ChunkedReceiver } from '../../src/network/stream/ChunkedReceiver';
 
 /**
@@ -13,15 +16,29 @@ import { ChunkedReceiver } from '../../src/network/stream/ChunkedReceiver';
 const CHUNK = 4096;
 const HEADER = 5;
 
-/** 送られたものを記録する偽の RTCDataChannel */
-function fakeChannel() {
+/** 送られたものを記録する偽の RTCDataChannel。fireLow で bufferedamountlow を起こす (events: false なら購読できない実装) */
+function fakeChannel(opts: { events?: boolean } = {}) {
   const sent: Uint8Array[] = [];
+  const listeners: Array<() => void> = [];
   const dc: any = {
     bufferedAmount: 0,
+    bufferedAmountLowThreshold: 0,
+    readyState: 'open',
     send: vi.fn((d: Uint8Array) => { sent.push(new Uint8Array(d)); }),
   };
-  return { dc, sent };
+  if (opts.events !== false) {
+    dc.addEventListener = (type: string, cb: () => void) => { if (type === 'bufferedamountlow') listeners.push(cb); };
+    dc.removeEventListener = (_type: string, cb: () => void) => {
+      const i = listeners.indexOf(cb);
+      if (i >= 0) listeners.splice(i, 1);
+    };
+  }
+  return { dc, sent, fireLow: () => listeners.slice().forEach(cb => cb()) };
 }
+
+/** 4096 を超えるものを分割させる (チャンクの形式を確かめる用。本番の閾値は UNCHUNKED_MAX_BYTES) */
+const SMALL = { maxMessageBytes: CHUNK };
+const BULK = { bulk: true };
 
 /** ワイヤに乗ったバイト列を受信側が受け取る ArrayBuffer にする */
 const toBuf = (u: Uint8Array): ArrayBuffer => u.slice().buffer;
@@ -46,22 +63,31 @@ function chunk(msgId: number, seq: number, total: number, payload: Uint8Array, o
 }
 
 describe('ChunkedSender', () => {
-  it('4096 バイト以下はそのまま 1 回で送る (ヘッダを付けない)', async () => {
+  it('16KiB 以下は分割せず 1 回で送る (ヘッダを付けない)。正規のフレームの最大 (トンネル・追いつき) がちょうど 16KiB', async () => {
     const s = new ChunkedSender();
-    for (const n of [1, 100, CHUNK]) {
+    for (const n of [1, 100, CHUNK, CHUNK + 1, UNCHUNKED_MAX_BYTES]) {
       const { dc, sent } = fakeChannel();
       const data = pattern(n);
-      await s.send(dc, data);
+      s.send(dc, data);
       expect(sent).toHaveLength(1);
       expect(sent[0]).toEqual(data);
     }
   });
 
-  it('4097 バイトは 2 チャンクに分け、ヘッダの各欄が正しい', async () => {
+  it('16KiB を超えるものは 4096 ずつに分ける。相手の上限 (maxMessageBytes) が小さければ、それを超えるものを分ける', () => {
+    const { dc, sent } = fakeChannel();
+    new ChunkedSender().send(dc, pattern(UNCHUNKED_MAX_BYTES + 1));
+    expect(sent).toHaveLength(5);
+    const small = fakeChannel();
+    new ChunkedSender().send(small.dc, pattern(CHUNK + 1), { maxMessageBytes: CHUNK });
+    expect(small.sent).toHaveLength(2);
+  });
+
+  it('4097 バイトを 4096 で分けると 2 チャンクで、ヘッダの各欄が正しい', async () => {
     const s = new ChunkedSender();
     const { dc, sent } = fakeChannel();
     const data = pattern(CHUNK + 1);
-    await s.send(dc, data);
+    s.send(dc, data, SMALL);
     expect(sent).toHaveLength(2);
 
     const v0 = new DataView(sent[0].buffer);
@@ -82,7 +108,7 @@ describe('ChunkedSender', () => {
 
   it('ちょうど 4096 の倍数ならチャンク数は割り切れた数', async () => {
     const { dc, sent } = fakeChannel();
-    await new ChunkedSender().send(dc, pattern(CHUNK * 3));
+    new ChunkedSender().send(dc, pattern(CHUNK * 3), SMALL);
     expect(sent).toHaveLength(3);
     expect(sent[2].length).toBe(HEADER + CHUNK);
   });
@@ -90,9 +116,9 @@ describe('ChunkedSender', () => {
   it('msgId はメッセージごとに 1 ずつ増える (分割しない送信では消費しない)', async () => {
     const s = new ChunkedSender();
     const { dc, sent } = fakeChannel();
-    await s.send(dc, pattern(CHUNK + 1));
-    await s.send(dc, pattern(10));
-    await s.send(dc, pattern(CHUNK + 1));
+    s.send(dc, pattern(CHUNK + 1), SMALL);
+    s.send(dc, pattern(10), SMALL);
+    s.send(dc, pattern(CHUNK + 1), SMALL);
     const id0 = new DataView(sent[0].buffer).getUint16(1);
     const id1 = new DataView(sent[3].buffer).getUint16(1);
     expect(id1).toBe(id0 + 1);
@@ -102,42 +128,104 @@ describe('ChunkedSender', () => {
     const s = new ChunkedSender();
     (s as any).msgCounter = 0xffff;
     const { dc, sent } = fakeChannel();
-    await s.send(dc, pattern(CHUNK + 1));
-    await s.send(dc, pattern(CHUNK + 1));
+    s.send(dc, pattern(CHUNK + 1), SMALL);
+    s.send(dc, pattern(CHUNK + 1), SMALL);
     expect(new DataView(sent[0].buffer).getUint16(1)).toBe(0xffff);
     expect(new DataView(sent[2].buffer).getUint16(1)).toBe(0);
   });
 
   it('ヘッダは 5 バイト (旧 12 バイト)。1MB のメッセージは 256 チャンクに収まり、それを超えると拒否する', async () => {
     const { dc, sent } = fakeChannel();
-    await new ChunkedSender().send(dc, pattern(1024 * 1024));
+    new ChunkedSender().send(dc, pattern(1024 * 1024));
     expect(sent).toHaveLength(256);
     expect(sent[255][4]).toBe(255);
     expect(sent[255][3]).toBe(255);
-    await expect(new ChunkedSender().send(fakeChannel().dc, pattern(1024 * 1024 + 1))).rejects.toThrow(RangeError);
+    expect(() => new ChunkedSender().send(fakeChannel().dc, pattern(1024 * 1024 + 1))).toThrow(RangeError);
   });
 
-  describe('バックプレッシャ', () => {
+  it('大きなデータの系統は 追いつき・leaseSet・トンネル・Ozzy だけ (制御・PEX・シグナリング・Gossip・Stem・セルは含まない)', () => {
+    const bulk = new Set<number>([
+      WireType.CATCHUP_REQ, WireType.CATCHUP_DATA, WireType.CATCHUP_END,
+      WireType.LEASESET, WireType.LEASESET_SYNC_REQ, WireType.LEASESET_SYNC,
+      WireType.TUNNEL_REGISTER, WireType.TUNNEL_REGISTERED, WireType.TUNNEL_SEND, WireType.TUNNEL_FWD, WireType.TUNNEL_DELIVER,
+      WireType.TUNNEL_REPLY, WireType.TUNNEL_RET, WireType.TUNNEL_RESULT, WireType.TUNNEL_ERROR,
+      WireType.OZZY_REPLY, WireType.OZZY_RESULT, WireType.OZZY_WORKER_REQ, WireType.OZZY_WORKER_ADS, WireType.OZZY_UP, WireType.OZZY_UP_FWD,
+    ]);
+    const types = Object.values(WireType).filter((v): v is WireType => typeof v === 'number' && v !== WireType.UNKNOWN);
+    for (const t of types) expect(isBulkFrame(t), `0x${t.toString(16)}`).toBe(bulk.has(t));
+    expect(isBulkFrame(0x00)).toBe(false); // チャンクの印
+  });
+
+  describe('送信待ちの制御 (大きなデータの系統)', () => {
     beforeEach(() => { vi.useFakeTimers(); });
     afterEach(() => { vi.useRealTimers(); });
 
-    it('bufferedAmount が 64KB を超えている間は次のチャンクを送らずに待つ', async () => {
-      const { dc, sent } = fakeChannel();
-      dc.bufferedAmount = 64 * 1024 + 1;
-      const p = new ChunkedSender().send(dc, pattern(CHUNK * 2));
-      await vi.advanceTimersByTimeAsync(100);
+    it('送信待ちが HIGH_WATER を超えていたら手元の列に貯め、bufferedamountlow で送った順に出す', () => {
+      const { dc, sent, fireLow } = fakeChannel();
+      dc.bufferedAmount = SEND_HIGH_WATER + 1;
+      const s = new ChunkedSender();
+      const a = pattern(UNCHUNKED_MAX_BYTES, 1), b = pattern(100, 2), c = pattern(5000, 3);
+      for (const d of [a, b, c]) expect(s.send(dc, d, BULK)).toBe(true);
       expect(sent).toHaveLength(0);
+      expect(s.queuedBytes).toBe(a.length + b.length + c.length);
+      expect(dc.bufferedAmountLowThreshold).toBe(SEND_LOW_WATER);
       dc.bufferedAmount = 0;
-      await vi.advanceTimersByTimeAsync(10);
-      await p;
+      fireLow();
+      expect(sent).toEqual([a, b, c]); // 後から来た小さいフレームが前を追い越さない
+      expect(s.queuedBytes).toBe(0);
+    });
+
+    it('列が空いていなければ、送信待ちが少なくても新しいフレームは列の後ろに並ぶ', () => {
+      const { dc, sent, fireLow } = fakeChannel();
+      const s = new ChunkedSender();
+      dc.bufferedAmount = SEND_HIGH_WATER + 1;
+      const a = pattern(100, 1), b = pattern(100, 2);
+      s.send(dc, a, BULK);
+      dc.bufferedAmount = 0;
+      s.send(dc, b, BULK); // ここで列の先頭から出す
+      expect(sent).toEqual([a, b]);
+      fireLow();
       expect(sent).toHaveLength(2);
     });
 
-    it('ちょうど 64KB なら待たない', async () => {
-      const { dc, sent } = fakeChannel();
-      dc.bufferedAmount = 64 * 1024;
-      await new ChunkedSender().send(dc, pattern(CHUNK * 2));
-      expect(sent).toHaveLength(2);
+    it('bufferedamountlow が無い実装でも、見回りで続きを出す', async () => {
+      const { dc, sent } = fakeChannel({ events: false });
+      const s = new ChunkedSender();
+      dc.bufferedAmount = SEND_HIGH_WATER + 1;
+      s.send(dc, pattern(100), BULK);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(sent).toHaveLength(0);
+      dc.bufferedAmount = 0;
+      await vi.advanceTimersByTimeAsync(25);
+      expect(sent).toHaveLength(1);
+    });
+
+    it('制御の系統 (投稿・セル・PING) は列に並ばずすぐ送る: 大きなデータの後ろで待たせない', () => {
+      const { dc, sent, fireLow } = fakeChannel();
+      const s = new ChunkedSender();
+      dc.bufferedAmount = SEND_HIGH_WATER + 1;
+      const bulk = pattern(UNCHUNKED_MAX_BYTES, 1), urgent = pattern(1200, 2);
+      s.send(dc, bulk, BULK);
+      s.send(dc, urgent);
+      expect(sent).toEqual([urgent]);
+      dc.bufferedAmount = 0;
+      fireLow();
+      expect(sent).toEqual([urgent, bulk]);
+    });
+
+    it('列の上限 (MAX_QUEUED_BYTES) を超える分は捨てて false。DataChannel が閉じていたら列を捨てる', () => {
+      const { dc, sent, fireLow } = fakeChannel();
+      const s = new ChunkedSender();
+      dc.bufferedAmount = SEND_HIGH_WATER + 1;
+      const frame = pattern(UNCHUNKED_MAX_BYTES);
+      const fits = MAX_QUEUED_BYTES / frame.length;
+      for (let i = 0; i < fits; i++) expect(s.send(dc, frame, BULK)).toBe(true);
+      expect(s.send(dc, frame, BULK)).toBe(false);
+      expect(s.dropped).toBe(1);
+      dc.readyState = 'closed';
+      fireLow();
+      expect(sent).toHaveLength(0);
+      expect(s.queuedBytes).toBe(0);
     });
   });
 });
@@ -158,7 +246,7 @@ describe('ChunkedReceiver', () => {
 
   async function sendThrough(data: Uint8Array) {
     const { dc, sent } = fakeChannel();
-    await new ChunkedSender().send(dc, data);
+    new ChunkedSender().send(dc, data, SMALL);
     return sent;
   }
 

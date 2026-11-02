@@ -167,6 +167,29 @@ describe('ThreadDAGManager: 先端 (Tips) と重み n(p) (祖先の数 + 1。ワ
     expect(dag.getAncestorCount('zzz')).toBeNull();
   });
 
+  it('getAncestorCount は追加の直後 (解析が古い) でも、解析し直した後と同じ値 (手元に無い親・自分を指す親は数えない)', () => {
+    const dag = new ThreadDAGManager(T);
+    const before = new Map<string, number | null>();
+    const add = (p: DAGPost) => {
+      dag.addPost(p);
+      before.set(p.packet_id, dag.getAncestorCount(p.packet_id)); // 解析を経ずに数える
+    };
+    add(post('a'));
+    add(post('b', { parents: ['a', 'missing'] }));
+    add(post('c', { parents: ['a', 'c'] }));
+    add(post('d', { parents: ['b', 'c'] }));
+    add(post('e', { parents: ['d', 'a'] }));
+    for (let i = 0; i < 40; i++) add(post(`x${i}`, { parents: i === 0 ? ['e'] : [`x${i - 1}`, i % 3 === 0 ? 'c' : 'b'] }));
+
+    dag.getSortedPosts(); // ここで解析する
+    for (const [id, n] of before) {
+      // 後から増えた投稿は祖先にならない (祖先は packet_id に固定) ので、追加直後の値と解析後の値は一致する
+      expect(dag.getAncestorCount(id)).toBe(n);
+    }
+    expect(before.get('e')).toBe(5);
+    expect(before.get('x39')).toBe(45);
+  });
+
   it('先端は最大 2 つ: 最も重い (n(p) が大きい) 先端 + 残りのうち最も古い先端 (固定長セルに収めるため)', () => {
     const dag = new ThreadDAGManager(T);
     deep(dag, 'light', 2, 999);

@@ -41,9 +41,15 @@ export const TUNNEL_LIMITS = {
   MAX_TUNNELS: { guard: 4096, client: 64 },
   /** 経路の状態の上限 (全体。G_R と G_h の合計) */
   MAX_ROUTES: { guard: 8192, client: 256 },
-  /** 普通の相手 (利用者・一般の隣人・信頼 Guard でない誰か)。1 回の応答 (最大 4MiB) が収まるバースト */
+  /**
+   * 普通の相手 (信頼 Guard と確かめられない相手) から受ける転送 (FWD) と応答 (REPLY / RET)。1 回の応答 (最大 4MiB) が収まるバースト。
+   * ★ 件数と同時数は、利用者の上り枠 (CLIENT_SEND) と同じにする。誰でもこの受け口へ直接つないで TUNNEL_SEND で同じ枠を使えるので、
+   *   FWD だけ狭くしても押し流しは止まらず、正直な中継 (信頼 Guard のリストが無い網・リストの Guard が居ないとき) が遅くなるだけ。
+   *   旧値 (2 件/秒・バースト 6・同時 6) では、256KiB のチャンク (断片 18 本) の預け入れが BUSY で弾かれ続け、
+   *   数百 KiB のファイルでも「預け先が足りない」で失敗した。帯域の枠はこのまま。
+   */
   PEER: {
-    reqPerSec: 2, reqBurst: 6, concurrent: 6,
+    reqPerSec: 60, reqBurst: 120, concurrent: 32,
     bytesPerSec: 2 * 1024 * 1024, bytesBurst: 8 * 1024 * 1024,
   } satisfies PeerBudget,
   /**
@@ -161,7 +167,9 @@ interface PendingDial {
  */
 export class TunnelRelay {
   private readonly now: () => number;
-  private readonly role: 'guard' | 'client';
+  private role: 'guard' | 'client';
+  /** テストが経路の上限を指定したか (役を替えても上書きしない) */
+  private readonly fixedMaxRoutes: boolean;
   private readonly cfg: {
     idleMs: number; peer: PeerBudget; backbone: PeerBudget; clientSend: ClientSendBudget; maxTunnelsPerPeer: number; maxRoutes: number; maxTunnels: number; dialTimeoutMs: number;
   };
@@ -219,6 +227,7 @@ export class TunnelRelay {
       maxTunnels: TUNNEL_LIMITS.MAX_TUNNELS[this.role],
       dialTimeoutMs: lim.dialTimeoutMs ?? TUNNEL_LIMITS.DIAL.TIMEOUT_MS,
     };
+    this.fixedMaxRoutes = lim.maxRoutes !== undefined;
     dispatcher.register(WireType.TUNNEL_REGISTER, (from, msg) => this.handleRegister(from, msg));
     dispatcher.register(WireType.TUNNEL_SEND, (from, msg) => this.handleSend(from, msg));
     dispatcher.register(WireType.TUNNEL_FWD, (from, msg) => this.handleFwd(from, msg));
@@ -267,6 +276,21 @@ export class TunnelRelay {
       this.peerState.set(peerId, st);
     }
     return st;
+  }
+
+  /**
+   * 役 (表の大きさ) を替える。信頼 Guard を使えていない間、一般のノードも Guard 並みに受け持つのに使う (OzNode)。
+   * 小さくしても、今ある経路・登録は消さない (新しいものを断るだけ)。
+   */
+  public setRole(role: 'guard' | 'client'): void {
+    if (role === this.role) return;
+    this.role = role;
+    if (!this.fixedMaxRoutes) this.cfg.maxRoutes = TUNNEL_LIMITS.MAX_ROUTES[role];
+    this.cfg.maxTunnels = TUNNEL_LIMITS.MAX_TUNNELS[role];
+  }
+
+  public get currentRole(): 'guard' | 'client' {
+    return this.role;
   }
 
   private take(bucket: Bucket, n: number, rate: number, burst: number): boolean {

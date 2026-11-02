@@ -18,7 +18,12 @@ export type FileTransferErrorCode =
   | 'bad-manifest';
 
 export class FileTransferError extends Error {
-  constructor(public readonly code: FileTransferErrorCode, message?: string) {
+  constructor(
+    public readonly code: FileTransferErrorCode,
+    message?: string,
+    /** insufficient-replicas のとき: 置けた別々の保持者の数と、必要な数 (画面の説明に使う) */
+    public readonly replicas?: { placed: number; needed: number },
+  ) {
     super(message ?? code);
     this.name = 'FileTransferError';
   }

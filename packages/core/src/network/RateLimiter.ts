@@ -59,6 +59,14 @@ export const RATE_LIMITS = {
    */
   tunnel: { ratePerSec: 200, burst: 600 },
   /**
+   * 信頼 Guard (リストの鍵で確かめた相手) からのトンネル (TUNNEL_*)。バックボーンの Guard は自分の利用者全員ぶんの応答を、
+   * 利用者から見た 1 ホップ目は自分宛ての応答 (過去ログ・ファイルの取得が並ぶ) を、1 本の接続に束ねて送ってくる。
+   * 普通の相手の枠 (tunnel: 200 フレーム/秒 ≒ 3MiB/秒) では TunnelRelay が許す帯域 (BACKBONE: 32MiB/秒) に届く前に片が捨てられ、
+   * 片が 1 つでも欠けた応答は丸ごと取り直しになる。32MiB/秒 ÷ 16KiB ≒ 2,048 に余裕を見て 2,400/秒、バースト 4,800 (2 秒)。
+   * 経路の無い片は TunnelRelay / TunnelClient が表引きで捨てる。
+   */
+  tunnelBackbone: { ratePerSec: 2400, burst: 4800 },
+  /**
    * Ozzy の代理取得の応答 (OZZY_REPLY: M1 → Guard / OZZY_RESULT: Guard → 読み手。ozzy/MeshRange)。
    * ★ GOSSIP・トンネル・オニオンと別バケット。応答は 4KiB 以下のフレームの列 (1 チャンク 4MiB = 約 1,050 フレーム)。
    * 送り手 (M1・Guard) は 1 相手あたり 2,500 フレーム/秒 (約 10MiB/秒) までに送出を絞るので、3,000/秒・

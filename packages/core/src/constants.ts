@@ -23,3 +23,10 @@ export const RING_MESH = {
  * 多数の利用者がこのノードを 1 ホップ目に選ぶので、通常 (MAX_DEGREE) より大きくする。
  */
 export const GUARD_MAX_DEGREE = 256;
+
+/**
+ * 一般のノード (role: 'client') が、信頼 Guard を使えていない間 (オープン網・リストの Guard に誰もつながらない) に
+ * 受け入れる最大の接続数。この間は誰もが 1 ホップ目に選ばれうるので、Guard 役のノードに利用者が集中しないよう多めに受け入れる
+ * (OzNode)。信頼 Guard につながったら MAX_DEGREE に戻す。
+ */
+export const OPEN_SERVICE_MAX_DEGREE = 64;

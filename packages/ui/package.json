@@ -12,7 +12,8 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "i18n": "tsx i18n/generate.ts"
   },
   "peerDependencies": {
     "@oz/core": "*",
@@ -26,6 +27,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "fake-indexeddb": "^6.2.5",
+    "js-yaml": "^4.3.2",
     "jsdom": "^29.1.1",
     "libsodium-wrappers-sumo": "^0.8.4",
     "react": "19.2.4",

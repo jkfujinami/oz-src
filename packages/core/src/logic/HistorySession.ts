@@ -1,5 +1,6 @@
 import type { HistoryFetcher } from '../network/history/HistoryClient';
 import { createLogger } from '../common/Logger';
+import type { StatusParams, StatusText } from './types';
 
 const log = createLogger('logic.history');
 
@@ -38,6 +39,8 @@ export class HistorySession {
     private readonly history: HistoryFetcher | null,
     /** 状態が変わったとき (進み具合・終了) */
     private readonly onChange: () => void,
+    /** 区分を保持者から最後まで取り切ったとき (startedAtMs = その取得を始めた時刻)。HistoryMarks に記録する */
+    private readonly onCompleted?: (job: HistoryJob, startedAtMs: number) => void,
   ) {}
 
   /** 取得の最中か (UI は「過去ログを取得中」を出す) */
@@ -50,12 +53,29 @@ export class HistorySession {
     return this.count;
   }
 
-  /** 画面に出す文言。バケットが複数なら進み具合 (k/n) も添える */
-  public message(): string {
+  /**
+   * 状態の文 (code = 'history-fetching')。バケットが複数なら進み具合 (done/total)、受け取りがあれば件数 (count) を params に添える。
+   * ★ 画面はこの code と params から、その言語の文を作る。message は日本語の既定文。
+   */
+  public status(): StatusText {
+    const params: StatusParams = {};
     const parts: string[] = [];
-    if (this.jobsTotal > 1) parts.push(`${Math.min(this.jobsDone + 1, this.jobsTotal)}/${this.jobsTotal}`);
-    if (this.count > 0) parts.push(`${this.count}件`);
-    return parts.length > 0 ? `過去ログを取得中... (${parts.join('・')})` : '過去ログを取得中...';
+    if (this.jobsTotal > 1) {
+      params.done = Math.min(this.jobsDone + 1, this.jobsTotal);
+      params.total = this.jobsTotal;
+      parts.push(`${params.done}/${params.total}`);
+    }
+    if (this.count > 0) {
+      params.count = this.count;
+      parts.push(`${this.count}件`);
+    }
+    const message = parts.length > 0 ? `過去ログを取得中... (${parts.join('・')})` : '過去ログを取得中...';
+    return Object.keys(params).length > 0 ? { code: 'history-fetching', params, message } : { code: 'history-fetching', message };
+  }
+
+  /** 画面に出す文言 (日本語の既定文。status().message と同じ) */
+  public message(): string {
+    return this.status().message;
   }
 
   /** 取得を始める。取得の途中なら何もしない (その取得が結果を運ぶ) */
@@ -99,8 +119,9 @@ export class HistorySession {
         if (i >= jobs.length) return;
         const job = jobs[i];
         let last = 0;
+        const startedAt = Date.now();
         try {
-          await history.fetchBucket(job.birthDay, job.tag, {
+          const res = await history.fetchBucket(job.birthDay, job.tag, {
             since: job.since,
             signal: ctl.signal,
             onProgress: (n) => {
@@ -109,6 +130,7 @@ export class HistorySession {
               if (this.runId === id) this.onChange();
             },
           });
+          if (res.completed && this.runId === id) this.onCompleted?.(job, startedAt);
         } catch (e) {
           log.warn('history fetch failed', e);
         }

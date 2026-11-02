@@ -8,6 +8,7 @@ import {
   LitterboxLockerAdapter,
   MemoryOverseasLockerCluster,
   OverseasMultiLockerCoordinator,
+  type OzzySlabEvent,
   PixeldrainLockerAdapter,
   PomfLockerAdapter,
   RamChunkArena,
@@ -90,7 +91,7 @@ describe('Ozzy v0.2 Overseas Anonymous Lockers Module-by-Module Verification Sui
     expect(expiredSlice).toBeNull();
   });
 
-  it('[Module 3: 0x0.st] uploads Slab with custom User-Agent, captures X-Token header, slices via HTTP Range (206), and purges via X-Token delete', async () => {
+  it('[Module 3: 0x0.st] uploads Slab (独自の User-Agent は付けない), captures X-Token header, slices via HTTP Range (206), and purges via X-Token delete', async () => {
     await sodiumReady;
     const cluster = new MemoryOverseasLockerCluster();
     const zeroXZero = new ZeroXZeroLockerAdapter(req => cluster.handleFetch(req), {
@@ -250,6 +251,41 @@ describe('Ozzy v0.2 Overseas Anonymous Lockers Module-by-Module Verification Sui
     expect(loc.slabChunks).toBe(5);
     expect(loc.chunkMap.length).toBe(5);
     expect(JSON.stringify(loc)).not.toContain(results[0].receipt.deleteToken);
+  });
+
+  it('アップロード中の Slab ごとの出来事: 置いた先と、落ちていたロッカーの失敗 (別のロッカーへ回した) を知らせる。受け取り票は入れない', async () => {
+    await sodiumReady;
+    const cluster = new MemoryOverseasLockerCluster();
+    const catbox = new CatboxLockerAdapter(req => cluster.handleFetch(req));
+    const litterbox = new LitterboxLockerAdapter(req => cluster.handleFetch(req));
+    const lain = new PomfLockerAdapter(req => cluster.handleFetch(req), { variant: 'pomf-lain' });
+    const coordinator = new OverseasMultiLockerCoordinator({
+      manifestStore: memoryManifestStore(),
+      adapters: [catbox, litterbox, lain],
+      chunkBytes,
+      targetBatchChunks: 5,
+      idleGapMs: 35,
+      maxWaitMs: 120,
+    });
+    cluster.setHostOffline('litter.catbox.moe', true);
+    const events: OzzySlabEvent[] = [];
+    const uploaded = await coordinator.uploadFile({
+      fileData: sodium.randombytes_buf(chunkBytes * 4),
+      fileName: 'events.bin',
+      mimeType: 'application/octet-stream',
+      onSlab: (e) => events.push(e),
+    });
+    const placed = events.filter(e => e.kind === 'placed');
+    expect(placed).toHaveLength(uploaded.receipts.length);
+    expect(placed.every(e => e.lockerId !== 'litterbox')).toBe(true);
+    // litterbox に振り分けた分は失敗し、別のロッカーへ回った
+    expect(events.some(e => e.kind === 'failed' && e.lockerId === 'litterbox')).toBe(true);
+    expect(placed.some(e => e.intended === 'litterbox' && e.lockerId !== 'litterbox')).toBe(true);
+    const text = JSON.stringify(events);
+    for (const r of uploaded.receipts) {
+      expect(text).not.toContain(r.downloadUrl);
+      if (r.deleteToken) expect(text).not.toContain(r.deleteToken);
+    }
   });
 
   it('[Module 8: OverseasMultiLockerCoordinator] distributes across 6 heterogeneous lockers, survives simultaneous 2-locker outages, and executes Polite DELETE', async () => {
